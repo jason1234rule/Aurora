@@ -9,6 +9,14 @@
           <template v-if="store.needsReviewCount"> · {{ store.needsReviewCount }} need review</template>
         </p>
       </div>
+      <button
+        @click="player.setMixMode(!player.mixMode)"
+        class="flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium transition-colors shrink-0"
+        :class="player.mixMode ? 'bg-accent/20 text-accent' : 'bg-white/[0.08] text-white/60 hover:bg-white/[0.12]'"
+        title="Pick each next song by following your transitions"
+      >
+        Mix mode {{ player.mixMode ? 'on' : 'off' }}
+      </button>
     </div>
 
     <div v-if="store.list.length" class="flex items-center gap-2 mb-3">

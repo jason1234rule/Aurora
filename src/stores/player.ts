@@ -7,6 +7,8 @@ import {
   type PrepareResult, type PreviewHandle, type PreviewOptions,
 } from '@/utils/transitions/engine'
 import type { TransitionTiming } from '@/utils/transitions/schedule'
+import { pickNextMix, type MixCandidate } from '@/utils/transitions/mix'
+import { songKey } from '@/utils/smartPlaylistMatcher'
 import type { Transition } from '@/types/transition'
 
 // Lazy accessor for library store to avoid circular dependency
@@ -415,6 +417,16 @@ export const usePlayerStore = defineStore('player', () => {
   const txSkip = new Set<string>()
   let txUiTimer: ReturnType<typeof setInterval> | null = null
 
+  // ── Mix mode ─────────────────────────────────────────────────────────────
+  // Walks the graph of saved transitions: each time a song starts, the next one
+  // is chosen from the transitions out of it (see utils/transitions/mix.ts).
+  const mixMode = ref(false)
+  /** Queue entries (track ids) that Mix mode put there */
+  const mixPicks = ref(new Set<string>())
+  /** songKeys of recently started tracks, oldest first */
+  const mixHistory: string[] = []
+  let mixPickPending = false
+
   // ── LRC sync mode (pause at end of track instead of advancing) ────────
   const lrcSyncMode = ref(false)
 
@@ -673,6 +685,7 @@ export const usePlayerStore = defineStore('player', () => {
     if (typeof s.crossfadeEnabled === 'boolean') crossfadeEnabled.value = s.crossfadeEnabled
     if (s.crossfadeDuration !== undefined) crossfadeDuration.value = s.crossfadeDuration
     if (s.transitionsEnabled === false) transitionsEnabled.value = false
+    if (s.mixMode === true) mixMode.value = true
   })
 
   // ── MediaSession action handlers (MPRIS integration) ─────────────────────
@@ -888,6 +901,7 @@ export const usePlayerStore = defineStore('player', () => {
 
   /** Everything that follows a track becoming current: preload, scrobble/stats reset, waveform, OS metadata */
   function announceTrack(track: Track) {
+    scheduleMixPick()
     // Update preload caches (resolve remaining URLs + shift buffer window)
     _preloadAdjacent()
 
@@ -1130,6 +1144,7 @@ export const usePlayerStore = defineStore('player', () => {
     cfNextIndex = -1
     // Update remaining metadata / preload
     pluginBus.emit('trackChange', { ...nextTrack })
+    scheduleMixPick()
     _preloadAdjacent()
     if (waveformEnabled.value) {
       if (nextTrack.source === 'subsonic' && nextTrack.path.startsWith('subsonic://')) {
@@ -1374,6 +1389,63 @@ export const usePlayerStore = defineStore('player', () => {
     seek(Math.max(0, startAt))
   }
 
+  // ── Mix mode ─────────────────────────────────────────────────────────────
+  /** A library track for a transition endpoint: same file if it's still there, else same song */
+  function resolveEndpointTrack(ep: { key: string; path: string }): Track | null {
+    const tracks: Track[] = getLibStore()?.tracks ?? []
+    return tracks.find(t => t.path === ep.path) ?? tracks.find(t => songKey(t) === ep.key) ?? null
+  }
+
+  function scheduleMixPick() {
+    if (mixPickPending) return
+    mixPickPending = true
+    // After the caller has finished updating queue state
+    queueMicrotask(() => { mixPickPending = false; mixPick() })
+  }
+
+  function mixPick() {
+    const cur = currentTrack.value
+    if (!cur) return
+    const key = songKey(cur)
+    if (mixHistory[mixHistory.length - 1] !== key) {
+      mixHistory.push(key)
+      if (mixHistory.length > 50) mixHistory.shift()
+    }
+    if (!mixMode.value || repeatMode.value === 'one' || !isLocalTrack(cur)) return
+    const store = useTransitionsStore()
+    const nextIdx = upcomingIndex()
+    const next = nextIdx >= 0 ? queue.value[nextIdx] : null
+    // Already heading somewhere through a hand-made transition: keep it
+    const existing = next ? store.find(cur, next) : null
+    if (existing && !existing.needsReview) return
+
+    const candidates: MixCandidate[] = []
+    for (const t of store.outgoing(cur)) {
+      const track = resolveEndpointTrack(t.to)
+      if (track && isLocalTrack(track) && track.id !== cur.id) candidates.push({ transition: t, track, key: t.to.key })
+    }
+    const pick = pickNextMix({
+      candidates,
+      recentKeys: mixHistory,
+      contextKeys: new Set(originalQueue.value.map(songKey)),
+    })
+    if (!pick) return
+
+    // Pull it forward if it's already queued later on, otherwise insert it
+    const later = queue.value.findIndex((t, i) => i > currentIndex.value && t.id === pick.track.id)
+    if (later >= 0) queue.value.splice(later, 1)
+    queue.value.splice(currentIndex.value + 1, 0, pick.track)
+    mixPicks.value = new Set([...mixPicks.value, pick.track.id])
+    pluginBus.emit('queueChange', queue.value)
+    _preloadAdjacent()
+  }
+
+  function setMixMode(enabled: boolean) {
+    mixMode.value = enabled
+    window.api.mergeSettings({ mixMode: enabled })
+    if (enabled) scheduleMixPick()
+  }
+
   /** Snapshot for the dev hook / debugging */
   function transitionDebug() {
     return {
@@ -1576,6 +1648,7 @@ export const usePlayerStore = defineStore('player', () => {
 
   function clearQueue() {
     abortTransition()
+    mixPicks.value = new Set()
     queue.value = []
     originalQueue.value = []
     currentIndex.value = -1
@@ -1989,6 +2062,9 @@ export const usePlayerStore = defineStore('player', () => {
     transitionDebug,
     previewTransition,
     stopTransitionPreview,
+    mixMode,
+    mixPicks,
+    setMixMode,
     isTransitionPreviewing,
     getAudioContext,
     auditionTransition,
