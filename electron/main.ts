@@ -318,6 +318,18 @@ const waveformCachePath = join(cachePath,  'waveform-cache.json')
 let artistInfoCache: Record<string, { data: any; ts: number }> = {}
 const ARTIST_CACHE_TTL = 7 * 24 * 60 * 60 * 1000 // 7 days
 
+// Discography is cached in memory only, so a restart always picks up new releases
+const artistReleasesCache = new Map<string, { data: ArtistRelease[]; ts: number }>()
+const ARTIST_RELEASES_TTL = 12 * 60 * 60 * 1000 // 12 hours
+interface ArtistRelease {
+  title: string
+  type: string
+  releaseDate: string
+  coverUrl: string | null
+  url: string
+  explicit: boolean
+}
+
 async function loadArtistCache() {
   try {
     if (existsSync(artistCachePath)) {
@@ -330,6 +342,69 @@ async function saveArtistCache() {
   try {
     await writeFile(artistCachePath, JSON.stringify(artistInfoCache))
   } catch {}
+}
+
+// ── Spotify stream counts (kworb.net) ──────────────────────────────────────
+// kworb publishes daily Spotify stream totals per artist. It has no API, so we
+// read its plain-HTML songs table. Cached on disk for 3 days.
+interface ArtistStreams {
+  spotifyId: string
+  lastUpdated: string       // as printed by kworb, e.g. "2026/10/11"
+  totalStreams: number
+  dailyStreams: number
+  songs: { title: string; streams: number; daily: number; feature: boolean }[]
+}
+
+const streamsCachePath = join(cachePath, 'artist-streams-cache.json')
+const ARTIST_STREAMS_TTL = 3 * 24 * 60 * 60 * 1000 // 3 days
+let artistStreamsCache: Record<string, { data: ArtistStreams | null; ts: number }> = {}
+
+async function loadStreamsCache() {
+  try {
+    if (existsSync(streamsCachePath)) {
+      artistStreamsCache = JSON.parse(await readFile(streamsCachePath, 'utf-8'))
+    }
+  } catch { artistStreamsCache = {} }
+}
+
+async function saveStreamsCache() {
+  try {
+    await writeFile(streamsCachePath, JSON.stringify(artistStreamsCache))
+  } catch {}
+}
+
+function spotifyIdFromRelations(relations: any[]): string {
+  for (const r of relations) {
+    const m = (r.url?.resource || '').match(/open\.spotify\.com\/artist\/([A-Za-z0-9]{22})/)
+    if (m) return m[1]
+  }
+  return ''
+}
+
+function parseKworbSongs(html: string, spotifyId: string): ArtistStreams | null {
+  const toNum = (s: string) => Number(s.replace(/,/g, '')) || 0
+  const decode = (s: string) => s
+    .replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+
+  const streamsRow = html.match(/<td class="text">Streams<\/td><td>([\d,]+)<\/td>/)
+  const dailyRow = html.match(/<td class="text">Daily<\/td><td>([\d,]+)<\/td>/)
+  if (!streamsRow) return null
+
+  const songs: ArtistStreams['songs'] = []
+  // Song rows look like: <td class="text"><div>[* ]<a href="https://open.spotify.com/track/…">Title</a></div></td><td>1,234</td><td>56</td>
+  // A leading "* " marks tracks where the artist is only featured.
+  const rowRe = /<td class="text"><div>(\*\s*)?<a href="https:\/\/open\.spotify\.com\/track\/[^"]+"[^>]*>([^<]+)<\/a><\/div><\/td><td>([\d,]+)<\/td><td>([\d,]*)<\/td>/g
+  for (const m of html.matchAll(rowRe)) {
+    songs.push({ title: decode(m[2]), streams: toNum(m[3]), daily: toNum(m[4]), feature: !!m[1] })
+  }
+
+  return {
+    spotifyId,
+    lastUpdated: html.match(/Last updated: ([\d/]+)/)?.[1] || '',
+    totalStreams: toNum(streamsRow[1]),
+    dailyStreams: dailyRow ? toNum(dailyRow[1]) : 0,
+    songs,
+  }
 }
 
 // ── Waveform disk cache ────────────────────────────────────────────────────
@@ -1394,6 +1469,7 @@ app.whenReady().then(async () => {
   // Load library into memory cache on startup
   await loadCache()
   await loadArtistCache()
+  await loadStreamsCache()
   await loadWaveformCache()
   logger.info(`Library cache loaded: ${cache.tracks.length} tracks, ${cache.folders.length} folders`)
   // Start background lyrics fetch 30 s after startup so the UI can settle first
@@ -2317,7 +2393,13 @@ app.whenReady().then(async () => {
         country: artist.country || artist.area?.name || '',
         beginDate: artist['life-span']?.begin || '',
         endDate: artist['life-span']?.end || '',
-        tags: (artist.tags || []).slice(0, 10).map((t: any) => t.name),
+        // Only keep tags more than one MusicBrainz user agreed on, most-voted first
+        tags: (artist.tags || [])
+          .filter((t: any) => (t.count || 0) >= 2)
+          .sort((a: any, b: any) => (b.count || 0) - (a.count || 0))
+          .slice(0, 5)
+          .map((t: any) => t.name),
+        fans: 0,
         bio: '',
         imageUrl: null,
         website: '',
@@ -2340,6 +2422,9 @@ app.whenReady().then(async () => {
         }
         if (deezerArtist?.id) {
           deezerArtistId = deezerArtist.id
+        }
+        if (deezerArtist?.nb_fan) {
+          info.fans = deezerArtist.nb_fan
         }
       } catch { /* Deezer lookup failed */ }
 
@@ -2416,6 +2501,9 @@ app.whenReady().then(async () => {
           if (homepageRel?.url?.resource) {
             info.website = homepageRel.url.resource
           }
+
+          // Spotify artist ID (used to look up stream counts on kworb.net)
+          info.spotifyId = spotifyIdFromRelations(relations)
 
           // Extract social network links (excluding streaming platforms)
           const socialRels = relations.filter((r: any) => r.type === 'social network' && r.url?.resource)
@@ -2506,6 +2594,73 @@ app.whenReady().then(async () => {
     } catch (err) {
       logger.error('Artist info fetch error:', err)
       return null
+    }
+  })
+
+  // ── IPC: Artist releases (Deezer discography, newest first) ──
+  // Kept separate from artist:get-info so new releases show up within hours
+  // rather than waiting out the 7-day artist info cache.
+  ipcMain.handle('artist:get-releases', async (_, artistName: string, forceRefresh = false) => {
+    const cached = artistReleasesCache.get(artistName)
+    if (!forceRefresh && cached && Date.now() - cached.ts < ARTIST_RELEASES_TTL) return cached.data
+
+    try {
+      const normalize = (s: string) => s.toLowerCase().trim()
+      const searchRaw = await fetchJSON(`https://api.deezer.com/search/artist?q=${encodeURIComponent(artistName)}&limit=5`)
+      const match = JSON.parse(searchRaw).data?.find((a: any) => normalize(a.name) === normalize(artistName))
+      if (!match?.id) return []
+
+      const albumsRaw = await fetchJSON(`https://api.deezer.com/artist/${match.id}/albums?limit=100`)
+      const releases = (JSON.parse(albumsRaw).data || [])
+        .map((a: any) => ({
+          title: a.title as string,
+          type: (a.record_type || 'album') as string,
+          releaseDate: (a.release_date || '') as string,
+          coverUrl: (a.cover_xl || a.cover_big || null) as string | null,
+          url: (a.link || '') as string,
+          explicit: !!a.explicit_lyrics,
+        }))
+        .sort((a: any, b: any) => b.releaseDate.localeCompare(a.releaseDate))
+
+      artistReleasesCache.set(artistName, { data: releases, ts: Date.now() })
+      return releases
+    } catch (err) {
+      logger.error('Artist releases fetch error:', err)
+      return cached?.data ?? []
+    }
+  })
+
+  // ── IPC: Artist Spotify stream counts (kworb.net) ──
+  ipcMain.handle('artist:get-streams', async (_, artistName: string, forceRefresh = false) => {
+    const cached = artistStreamsCache[artistName]
+    if (!forceRefresh && cached && Date.now() - cached.ts < ARTIST_STREAMS_TTL) return cached.data
+
+    try {
+      let spotifyId: string = artistInfoCache[artistName]?.data?.spotifyId || ''
+      if (!spotifyId) {
+        // Artist info cached before spotifyId existed: look it up directly
+        const normalize = (s: string) => s.toLowerCase().trim()
+        const search = JSON.parse(await fetchJSON(
+          `https://musicbrainz.org/ws/2/artist/?query=artist:${encodeURIComponent(`"${artistName}"`)}&fmt=json&limit=5`
+        ))
+        const mbArtist = search.artists?.find((a: any) => normalize(a.name) === normalize(artistName))
+        if (mbArtist?.id) {
+          await new Promise(r => setTimeout(r, 1200)) // MusicBrainz rate limit
+          const rels = JSON.parse(await fetchJSON(`https://musicbrainz.org/ws/2/artist/${mbArtist.id}?inc=url-rels&fmt=json`))
+          spotifyId = spotifyIdFromRelations(rels.relations || [])
+        }
+      }
+
+      // No Spotify ID or no kworb page are "known unknowns": cache them too so we don't keep asking
+      const data = spotifyId
+        ? parseKworbSongs(await fetchJSON(`https://kworb.net/spotify/artist/${spotifyId}_songs.html`), spotifyId)
+        : null
+      artistStreamsCache[artistName] = { data, ts: Date.now() }
+      saveStreamsCache()
+      return data
+    } catch (err) {
+      logger.error('Artist streams fetch error:', err)
+      return cached?.data ?? null
     }
   })
 

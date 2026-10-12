@@ -86,6 +86,32 @@ interface ArtistInfo {
   socials?: { name: string; url: string }[]
   members?: string[]
   similarArtists?: string[]
+  /** Deezer fan count (0 when unknown) */
+  fans?: number
+  /** Spotify artist ID from MusicBrainz ('' when unknown) */
+  spotifyId?: string
+}
+
+/** Spotify stream counts scraped from kworb.net */
+interface ArtistStreams {
+  spotifyId: string
+  /** As printed by kworb, e.g. "2026/10/11" */
+  lastUpdated: string
+  totalStreams: number
+  dailyStreams: number
+  /** `feature` is true for tracks where the artist is only featured */
+  songs: { title: string; streams: number; daily: number; feature: boolean }[]
+}
+
+interface ArtistRelease {
+  title: string
+  /** Deezer record type: 'album' | 'single' | 'ep' | 'compile' */
+  type: string
+  /** YYYY-MM-DD */
+  releaseDate: string
+  coverUrl: string | null
+  url: string
+  explicit: boolean
 }
 
 interface SmartPlaylistRule {
@@ -195,6 +221,8 @@ interface Window {
     generateWaveformSubsonic: (songId: string) => Promise<number[]>
     // Artist info
     getArtistInfo: (artistName: string, forceRefresh?: boolean) => Promise<ArtistInfo | null>
+    getArtistReleases: (artistName: string, forceRefresh?: boolean) => Promise<ArtistRelease[]>
+    getArtistStreams: (artistName: string, forceRefresh?: boolean) => Promise<ArtistStreams | null>
     // Folder structure
     getFolderTree: (folderPath: string) => Promise<FolderEntry[]>
     // Scrobbling

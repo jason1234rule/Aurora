@@ -62,8 +62,10 @@ export function splitArtists(artistStr: string): string[] {
   // Also normalize " & " to semicolons
   normalized = normalized.replace(/\s+&\s+/g, ' ; ')
 
-  // Split on unambiguous delimiters: ; and /
-  const parts = normalized.split(/\s*[;/]\s*/)
+  // Split on unambiguous delimiters: ";" and a spaced " / ". A bare "/" is part
+  // of the name ("AC/DC", "HUNTR/X"); ID3v2.3 slash-separated values are already
+  // split by the tag reader before they get here.
+  const parts = normalized.split(/\s*;\s*|\s+\/\s+/)
 
   // For each part, try smart comma splitting
   const result: string[] = []
