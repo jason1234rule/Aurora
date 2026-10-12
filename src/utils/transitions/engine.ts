@@ -19,7 +19,7 @@
 import type { Transition } from '@/types/transition'
 import {
   buildSchedule, toPositionAt, fromPositionAt, rampRateToUnity, effectiveOverlap, applyParamEvents,
-  planValueAt, rateAt, type TransitionSchedule,
+  planValueAt, rateAt, type TransitionSchedule, type TransitionTiming,
 } from './schedule'
 import { buildTransitionGraph, type TransitionGraph } from './graph'
 import { findAlignment, mixToMono } from './align'
@@ -62,6 +62,27 @@ export interface EngineHost {
   onSettled(to: Track): void
   /** TO wouldn't load in the element: the player should load it normally at `position` */
   onHandbackFailed(to: Track, position: number): void
+}
+
+export type PreviewSolo = 'both' | 'from' | 'to'
+
+export interface PreviewOptions {
+  /** Seconds of FROM before exitAt */
+  preRoll: number
+  /** Seconds after the overlap ends */
+  postRoll: number
+  solo: PreviewSolo
+  onEnded?: () => void
+}
+
+export interface PreviewHandle {
+  /** ctx time at which exitAt is heard */
+  t0: number
+  startAt: number
+  endAt: number
+  schedule: TransitionSchedule
+  setSolo(solo: PreviewSolo): void
+  stop(): void
 }
 
 export type PrepareResult =
@@ -439,6 +460,72 @@ export class TransitionEngine {
   restoreElementGain(delay = 0.03) {
     rampFromCurrent(this.host.elementGain.gain, this.host.ctx.currentTime + delay, 1, 0.02)
   }
+
+  // ── Editor preview ───────────────────────────────────────────────────────
+
+  private previewHandle: PreviewHandle | null = null
+
+  /**
+   * Play a transition from whole-file buffers, through the same schedule and graph
+   * as live playback. The caller must pause normal playback first.
+   */
+  preview(buffers: { from: AudioBuffer; to: AudioBuffer }, t: TransitionTiming, opts: PreviewOptions): PreviewHandle {
+    this.stopPreview()
+    const { ctx } = this.host
+    const preRoll = Math.max(0, Math.min(opts.preRoll, t.exitAt))
+    const startAt = ctx.currentTime + 0.08
+    const t0 = startAt + preRoll
+    const s = buildSchedule(t, { t0, leadIn: preRoll, fromWindowStart: 0, toWindowStart: 0, sampleRate: ctx.sampleRate })
+    const endAt = s.overlapEnd + opts.postRoll
+
+    const master = ctx.createGain()
+    master.connect(this.out)
+    const fromBus = ctx.createGain()
+    const toBus = ctx.createGain()
+    fromBus.connect(master)
+    toBus.connect(master)
+    const applySolo = (solo: PreviewSolo, at: number) => {
+      rampFromCurrent(fromBus.gain, at, solo === 'to' ? 0 : 1, 0.02)
+      rampFromCurrent(toBus.gain, at, solo === 'from' ? 0 : 1, 0.02)
+    }
+    fromBus.gain.value = opts.solo === 'to' ? 0 : 1
+    toBus.gain.value = opts.solo === 'from' ? 0 : 1
+    // Fade the tail so the preview doesn't stop mid-note
+    master.gain.setValueAtTime(1, Math.max(startAt, endAt - 0.4))
+    master.gain.linearRampToValueAtTime(0, endAt)
+
+    const graph = buildTransitionGraph(ctx, buffers, s, fromBus, toBus)
+    graph.dispose(endAt + 0.02)
+    let stopped = false
+    const cleanup = () => {
+      if (stopped) return
+      stopped = true
+      clearTimeout(endTimer)
+      setTimeout(() => { for (const n of [master, fromBus, toBus]) n.disconnect() }, 100)
+      if (this.previewHandle === handle) this.previewHandle = null
+    }
+    const endTimer = setTimeout(() => { cleanup(); opts.onEnded?.() }, (endAt - ctx.currentTime) * 1000 + 30)
+    const handle: PreviewHandle = {
+      t0, startAt, endAt, schedule: s,
+      setSolo: (solo) => { if (!stopped) applySolo(solo, ctx.currentTime + 0.01) },
+      stop: () => {
+        if (stopped) return
+        const now = ctx.currentTime
+        rampFromCurrent(master.gain, now, 0, 0.03)
+        graph.dispose(now + 0.04)
+        cleanup()
+      },
+    }
+    this.previewHandle = handle
+    return handle
+  }
+
+  stopPreview() {
+    this.previewHandle?.stop()
+    this.previewHandle = null
+  }
+
+  get previewing(): boolean { return !!this.previewHandle }
 
   // ── Internals ─────────────────────────────────────────────────────────────
 

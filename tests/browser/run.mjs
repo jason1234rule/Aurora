@@ -151,7 +151,8 @@ function analyze(r) {
     segments['FROM on buffer, before back-out'] = errorsMs(Lp, fromExpected, s.fromStartAt + 0.05, r.collapseAt)
     segments['FROM on element, after back-out'] = errorsMs(Lp, fromExpected, r.collapseAt + 0.1, Infinity)
   } else {
-    segments['FROM on buffer'] = errorsMs(Lp, fromExpected, s.fromStartAt + 0.05, s.overlapEnd)
+    // Echo-out: after the dry cut the left channel is echo repeats, which are off-grid by design
+    segments['FROM on buffer'] = errorsMs(Lp, fromExpected, s.fromStartAt + 0.05, r.type === 'echo-out' ? s.t0 : s.overlapEnd)
     segments['TO on buffer'] = errorsMs(Rp, r.toBeatTimes, s.t0, r.settleCtx - 0.05)
     segments['TO on element, after handback'] = errorsMs(Rp, r.toBeatTimes, r.settleCtx + 0.01, Infinity)
   }

@@ -2,7 +2,11 @@ import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
 import { pluginBus } from '@/plugins/eventBus'
 import { useTransitionsStore } from './transitions'
-import { TransitionEngine, PREP_WINDOW, MEASURE_LEAD, leadInFor, type PrepareResult } from '@/utils/transitions/engine'
+import {
+  TransitionEngine, PREP_WINDOW, MEASURE_LEAD, leadInFor,
+  type PrepareResult, type PreviewHandle, type PreviewOptions,
+} from '@/utils/transitions/engine'
+import type { TransitionTiming } from '@/utils/transitions/schedule'
 import type { Transition } from '@/types/transition'
 
 // Lazy accessor for library store to avoid circular dependency
@@ -495,7 +499,8 @@ export const usePlayerStore = defineStore('player', () => {
       }
     }
     // Crossfade trigger (skip for external streams — live/CDN sources)
-    if (crossfadeEnabled.value && !isCrossfading && !usingStream && duration.value > 0 && isPlaying.value && !txEngine?.active) {
+    // A prepared hand-made transition owns this track change, even before it starts
+    if (crossfadeEnabled.value && !isCrossfading && !usingStream && duration.value > 0 && isPlaying.value && (!txEngine || txEngine.phase === 'idle')) {
       const timeLeft = duration.value - audio.currentTime
       if (timeLeft > 0 && timeLeft <= crossfadeDuration.value + 0.2) {
         startCrossfade()
@@ -1343,6 +1348,32 @@ export const usePlayerStore = defineStore('player', () => {
     if (!enabled && txEngine && !txEngine.committed) txEngine.collapseToFrom()
   }
 
+  /** Editor preview through the transition engine; pauses normal playback first. */
+  function previewTransition(buffers: { from: AudioBuffer; to: AudioBuffer }, t: TransitionTiming, opts: PreviewOptions): PreviewHandle | null {
+    if (isPlaying.value) pause()
+    const eng = getTxEngine()
+    return eng ? eng.preview(buffers, t, opts) : null
+  }
+
+  function stopTransitionPreview() {
+    txEngine?.stopPreview()
+  }
+
+  function isTransitionPreviewing(): boolean {
+    return txEngine?.previewing ?? false
+  }
+
+  function getAudioContext(): AudioContext | null {
+    return audioCtx
+  }
+
+  /** Play FROM a little before its exit point with TO queued next, so a saved transition runs for real. */
+  async function auditionTransition(from: Track, to: Track, startAt: number) {
+    await play(from)
+    if (queue.value[currentIndex.value + 1]?.id !== to.id) playNext(to)
+    seek(Math.max(0, startAt))
+  }
+
   /** Snapshot for the dev hook / debugging */
   function transitionDebug() {
     return {
@@ -1363,6 +1394,7 @@ export const usePlayerStore = defineStore('player', () => {
 
   // ── Actions ──────────────────────────────────────────────────────────────
   async function play(track?: Track) {
+    txEngine?.stopPreview()
     if (track) {
       const idx = queue.value.findIndex((t) => t.id === track.id)
       if (idx >= 0) {
@@ -1955,6 +1987,11 @@ export const usePlayerStore = defineStore('player', () => {
     setTransitionsEnabled,
     upcomingTrack,
     transitionDebug,
+    previewTransition,
+    stopTransitionPreview,
+    isTransitionPreviewing,
+    getAudioContext,
+    auditionTransition,
     // Scrobbling
     setScrobblingEnabled,
     // Playback error

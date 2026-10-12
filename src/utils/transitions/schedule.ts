@@ -74,7 +74,8 @@ export interface ScheduleOptions {
   sampleRate?: number
 }
 
-type TimingFields = Pick<Transition,
+/** The parts of a Transition that affect how it sounds */
+export type TransitionTiming = Pick<Transition,
   'type' | 'exitAt' | 'entryAt' | 'overlap' | 'fadeOut' | 'fadeIn' | 'bassSwap' | 'filter' | 'echo' | 'rateTo'>
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
@@ -176,7 +177,7 @@ export function rampRateToUnity(points: RatePoint[], time: number, ramp: number)
 
 // ── Schedule ────────────────────────────────────────────────────────────────
 
-export function buildSchedule(t: TimingFields, opts: ScheduleOptions): TransitionSchedule {
+export function buildSchedule(t: TransitionTiming, opts: ScheduleOptions): TransitionSchedule {
   const { t0 } = opts
   const overlap = effectiveOverlap(t)
   const kind: Transition['type'] = overlap === 0 ? 'cut' : t.type

@@ -69,6 +69,8 @@ contextBridge.exposeInMainWorld('api', {
   getTransitions: () => ipcRenderer.invoke('transitions:get'),
   saveTransition: (transition: any) => ipcRenderer.invoke('transitions:save', transition),
   deleteTransition: (id: string) => ipcRenderer.invoke('transitions:delete', id),
+  getBeatGrid: (filePath: string) => ipcRenderer.invoke('beatgrid:get', filePath),
+  saveBeatGrid: (filePath: string, grid: any) => ipcRenderer.invoke('beatgrid:set', filePath, grid),
 
   // Discord RPC
   updateDiscordPresence: (data: any) => ipcRenderer.invoke('discord:update-presence', data),

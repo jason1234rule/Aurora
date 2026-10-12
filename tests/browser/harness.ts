@@ -102,7 +102,7 @@ async function main() {
 
   const chunks: Float32Array[] = await new Promise(r => { rec.port.onmessage = (e) => r(e.data); rec.port.postMessage('stop') })
   ;(window as any).__result = {
-    log, debug: engine.debug, sampleRate: ctx.sampleRate, settleCtx, collapseAt, exitAt,
+    log, type: t.type, debug: engine.debug, sampleRate: ctx.sampleRate, settleCtx, collapseAt, exitAt,
     schedule: { t0: schedule.t0, overlapEnd: schedule.overlapEnd, fromStartAt: schedule.from.startAt },
     // Final rate envelope (finishNow rewrites it), so TO beats map to their true ctx times
     toBeatTimes: beats.toBeats.map((b: number) => toTimeAt(schedule, b)),

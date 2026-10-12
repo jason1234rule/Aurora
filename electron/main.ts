@@ -427,6 +427,28 @@ function scheduleWaveformFlush() {
   }, 5000)
 }
 
+// ── Beat grid disk cache (hand-made transitions editor) ────────────────────
+// Keyed by path; an entry only counts while the file's mtime and size match.
+const beatgridCachePath = join(cachePath, 'beatgrid-cache.json')
+let beatgridCache: Record<string, { mtimeMs: number; size: number; grid: any }> | null = null
+let beatgridFlushTimer: ReturnType<typeof setTimeout> | null = null
+
+async function getBeatgridCache() {
+  if (beatgridCache) return beatgridCache
+  try {
+    beatgridCache = existsSync(beatgridCachePath) ? JSON.parse(await readFile(beatgridCachePath, 'utf-8')) : {}
+  } catch { beatgridCache = {} }
+  return beatgridCache!
+}
+
+function scheduleBeatgridFlush() {
+  if (beatgridFlushTimer) return
+  beatgridFlushTimer = setTimeout(async () => {
+    beatgridFlushTimer = null
+    try { await writeFile(beatgridCachePath, JSON.stringify(beatgridCache)) } catch {}
+  }, 3000)
+}
+
 // ── In-memory library cache ────────────────────────────────────────────────
 // Loaded once at startup, mutated in place, flushed to disk on changes.
 // This eliminates repeated disk reads on every IPC call.
@@ -1884,6 +1906,25 @@ app.whenReady().then(async () => {
     return transitionsData
   })
 
+  // ── IPC: Beat grid cache ──
+  ipcMain.handle('beatgrid:get', async (_, filePath: string) => {
+    try {
+      const entry = (await getBeatgridCache())[filePath]
+      if (!entry) return null
+      const st = await stat(filePath)
+      return entry.mtimeMs === st.mtimeMs && entry.size === st.size ? entry.grid : null
+    } catch { return null }
+  })
+  ipcMain.handle('beatgrid:set', async (_, filePath: string, grid: any) => {
+    try {
+      const st = await stat(filePath)
+      ;(await getBeatgridCache())[filePath] = { mtimeMs: st.mtimeMs, size: st.size, grid }
+      scheduleBeatgridFlush()
+    } catch (err) {
+      logger.error('beatgrid:set failed:', err)
+    }
+  })
+
   // ── IPC: Discord RPC ──
   ipcMain.handle('discord:update-presence', async (_, data) => {
     await updateDiscordPresence(data)
@@ -2861,6 +2902,14 @@ app.whenReady().then(async () => {
         if (existsSync(waveformCachePath)) await rm(waveformCachePath)
         results.waveform = true
       } catch { results.waveform = false }
+    }
+
+    if (targets.includes('beatgrid')) {
+      try {
+        beatgridCache = {}
+        if (existsSync(beatgridCachePath)) await rm(beatgridCachePath)
+        results.beatgrid = true
+      } catch { results.beatgrid = false }
     }
 
     return results

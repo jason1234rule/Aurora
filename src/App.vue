@@ -22,7 +22,7 @@
 
       <main class="flex-1 overflow-y-auto overflow-x-hidden">
         <router-view v-slot="{ Component }">
-          <keep-alive :max="5" :exclude="['FullscreenView', 'MiniPlayerView']">
+          <keep-alive :max="5" :exclude="['FullscreenView', 'MiniPlayerView', 'TransitionEditorView']">
             <component :is="Component" :key="$route.path" />
           </keep-alive>
         </router-view>

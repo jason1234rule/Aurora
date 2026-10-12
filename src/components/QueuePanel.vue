@@ -141,6 +141,20 @@
                     </template>
                   </p>
                 </div>
+                <!-- Hand-made transition from the previous track -->
+                <button
+                  v-if="item.prev && isLocal(item.prev) && isLocal(item.track)"
+                  @click.stop="openTransition(item.prev, item.track)"
+                  class="q-tx-btn w-6 h-6 flex items-center justify-center rounded-full transition-colors shrink-0"
+                  :class="item.transition ? 'q-tx-on' : ''"
+                  :title="item.transition
+                    ? `Hand-made transition from “${item.prev.title}” (click to edit)`
+                    : `Create a transition from “${item.prev.title}”`"
+                >
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M7.5 21L3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" />
+                  </svg>
+                </button>
                 <span class="text-[10px] text-white/20 tabular-nums shrink-0 font-mono">{{ formatTime(item.track.duration) }}</span>
                 <button
                   @click.stop="player.removeFromQueue(item.queueIndex)"
@@ -221,6 +235,7 @@ import { ref, computed, watch, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { usePlayerStore } from '@/stores/player'
 import { useLibraryStore } from '@/stores/library'
+import { useTransitionsStore } from '@/stores/transitions'
 import { formatTime } from '@/utils/formatTime'
 import ArtistLinks from '@/components/ArtistLinks.vue'
 
@@ -251,6 +266,7 @@ onUnmounted(() => {
 const router = useRouter()
 const player = usePlayerStore()
 const library = useLibraryStore()
+const transitions = useTransitionsStore()
 const showPrevious = ref(false)
 
 // ── Drag & drop state ──────────────────────────────────────
@@ -299,12 +315,24 @@ const currentTrack = computed(() => {
 })
 
 const upNext = computed(() => {
-  const items: { track: Track; queueIndex: number }[] = []
+  const items: { track: Track; queueIndex: number; prev: Track | null; transition: boolean }[] = []
   for (let i = player.currentIndex + 1; i < player.queue.length; i++) {
-    items.push({ track: player.queue[i], queueIndex: i })
+    const prev = i > 0 ? player.queue[i - 1] : null
+    const track = player.queue[i]
+    items.push({ track, queueIndex: i, prev, transition: !!prev && !!transitions.find(prev, track) })
   }
   return items
 })
+
+const isLocal = (t: Track) => t.source !== 'subsonic' && (t.path.startsWith('/') || /^[a-zA-Z]:[/\\]/.test(t.path))
+
+function openTransition(from: Track, to: Track) {
+  emit('close')
+  const existing = transitions.find(from, to)
+  router.push(existing
+    ? { path: '/transition/edit', query: { id: existing.id } }
+    : { path: '/transition/edit', query: { from: from.id, to: to.id } })
+}
 
 const previousTracks = computed(() => {
   const items: { track: Track; queueIndex: number }[] = []
@@ -351,6 +379,10 @@ function goToAlbum(track: Track) {
 .queue-item:hover .q-drag-handle { color: rgb(var(--app-text) / 0.15); }
 .q-drag-handle:hover { color: rgb(var(--app-text) / 0.30) !important; }
 .q-remove-btn { color: transparent; }
+.q-tx-btn { color: transparent; }
+.queue-item:hover .q-tx-btn { color: rgb(var(--app-text) / 0.20); }
+.q-tx-btn:hover { color: rgb(var(--accent)) !important; background: rgb(var(--app-text) / 0.06); }
+.q-tx-btn.q-tx-on { color: rgb(var(--accent) / 0.85); }
 .queue-item:hover .q-remove-btn { color: rgb(var(--app-text) / 0.20); }
 .q-remove-btn:hover { color: #f87171 !important; }
 

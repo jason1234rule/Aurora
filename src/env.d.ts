@@ -204,6 +204,9 @@ interface Window {
     getTransitions: () => Promise<Record<string, import('@/types/transition').Transition>>
     saveTransition: (transition: import('@/types/transition').Transition) => Promise<Record<string, import('@/types/transition').Transition>>
     deleteTransition: (id: string) => Promise<Record<string, import('@/types/transition').Transition>>
+    /** Cached beat grid for a file, or null if missing or the file changed since */
+    getBeatGrid: (filePath: string) => Promise<import('@/types/transition').BeatGrid | null>
+    saveBeatGrid: (filePath: string, grid: import('@/types/transition').BeatGrid) => Promise<void>
     updateDiscordPresence: (data: any) => Promise<void>
     toggleDiscordRPC: (enabled: boolean, clientId?: string) => Promise<void>
     setTrayEnabled: (enabled: boolean) => Promise<void>
