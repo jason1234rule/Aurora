@@ -1,6 +1,9 @@
 import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
 import { pluginBus } from '@/plugins/eventBus'
+import { useTransitionsStore } from './transitions'
+import { TransitionEngine, PREP_WINDOW, MEASURE_LEAD, leadInFor, type PrepareResult } from '@/utils/transitions/engine'
+import type { Transition } from '@/types/transition'
 
 // Lazy accessor for library store to avoid circular dependency
 // Must not use require() — Vite doesn't resolve @/ aliases in require() calls
@@ -399,6 +402,15 @@ export const usePlayerStore = defineStore('player', () => {
   let cfNextTrack: Track | null = null
   let cfNextIndex = -1
 
+  // ── Hand-made transitions ────────────────────────────────────────────────
+  // See src/utils/transitions/engine.ts. The engine is created lazily once the
+  // audio graph exists; everything below just tells it when to act.
+  const transitionsEnabled = ref(true)
+  let txEngine: TransitionEngine | null = null
+  /** Transitions that failed or were skipped during the current track's play-through */
+  const txSkip = new Set<string>()
+  let txUiTimer: ReturnType<typeof setInterval> | null = null
+
   // ── LRC sync mode (pause at end of track instead of advancing) ────────
   const lrcSyncMode = ref(false)
 
@@ -459,6 +471,7 @@ export const usePlayerStore = defineStore('player', () => {
 
   // ── Audio event listeners ────────────────────────────────────────────────
   audio.addEventListener('timeupdate', () => {
+    if (txEngine?.ownsElement) return
     currentTime.value = audio.currentTime
     // Scrobble after listening to 50% or 4 minutes, whichever is first
     if (scrobblingEnabled && !scrobbleReported && currentTrack.value && duration.value > 30) {
@@ -482,30 +495,37 @@ export const usePlayerStore = defineStore('player', () => {
       }
     }
     // Crossfade trigger (skip for external streams — live/CDN sources)
-    if (crossfadeEnabled.value && !isCrossfading && !usingStream && duration.value > 0 && isPlaying.value) {
+    if (crossfadeEnabled.value && !isCrossfading && !usingStream && duration.value > 0 && isPlaying.value && !txEngine?.active) {
       const timeLeft = duration.value - audio.currentTime
       if (timeLeft > 0 && timeLeft <= crossfadeDuration.value + 0.2) {
         startCrossfade()
       }
     }
+    transitionTick()
   })
   audio.addEventListener('durationchange', () => {
+    if (txEngine?.ownsElement) return
     duration.value = audio.duration
   })
-  audio.addEventListener('ended', () => handleTrackEnd())
+  // While a transition runs, FROM may reach its end on the (muted) element: that's not a track end
+  audio.addEventListener('ended', () => { if (!txEngine?.active) handleTrackEnd() })
   audio.addEventListener('playing', () => {
+    if (txEngine?.ownsElement) return
     isPlaying.value = true
     isLoading.value = false
     pluginBus.emit('play')
   })
   audio.addEventListener('pause', () => {
+    if (txEngine?.active) return
     isPlaying.value = false
     pluginBus.emit('pause')
   })
   audio.addEventListener('waiting', () => {
+    if (txEngine?.ownsElement) return
     isLoading.value = true
   })
   audio.addEventListener('canplay', () => {
+    if (txEngine?.ownsElement) return
     isLoading.value = false
   })
 
@@ -516,6 +536,8 @@ export const usePlayerStore = defineStore('player', () => {
   audio.addEventListener('error', () => {
     // Ignore errors from intentional queue clearing (audio.src = '')
     if (!currentTrack.value) return
+    // The transition engine handles errors while it has the element
+    if (txEngine?.ownsElement) return
     isLoading.value = false
     isPlaying.value = false
     const err = audio.error
@@ -600,6 +622,7 @@ export const usePlayerStore = defineStore('player', () => {
     audio.volume = val * val
     audioStream.volume = val * val
     if (isCrossfading) audioNext.volume = val * val
+    txEngine?.setVolume(isMuted.value ? 0 : val * val)
     if (val > 0 && isMuted.value) isMuted.value = false
     // Persist volume
     window.api.mergeSettings({ volume: val })
@@ -609,6 +632,7 @@ export const usePlayerStore = defineStore('player', () => {
     audio.muted = val
     audioStream.muted = val
     if (isCrossfading) audioNext.muted = val
+    txEngine?.setVolume(val ? 0 : volume.value * volume.value)
   })
 
   // ── Restore persisted playback settings ────────────────────────────────────
@@ -643,6 +667,7 @@ export const usePlayerStore = defineStore('player', () => {
     scrobblingEnabled = s.scrobblingEnabled === true
     if (typeof s.crossfadeEnabled === 'boolean') crossfadeEnabled.value = s.crossfadeEnabled
     if (s.crossfadeDuration !== undefined) crossfadeDuration.value = s.crossfadeDuration
+    if (s.transitionsEnabled === false) transitionsEnabled.value = false
   })
 
   // ── MediaSession action handlers (MPRIS integration) ─────────────────────
@@ -796,6 +821,7 @@ export const usePlayerStore = defineStore('player', () => {
   // ── Internal helpers ─────────────────────────────────────────────────────
   async function loadTrack(track: Track) {
     cancelCrossfade()
+    abortTransition()
     currentTrack.value = track
     duration.value = track.duration || 0
     isLoading.value = true
@@ -852,6 +878,11 @@ export const usePlayerStore = defineStore('player', () => {
       }
     }
 
+    announceTrack(track)
+  }
+
+  /** Everything that follows a track becoming current: preload, scrobble/stats reset, waveform, OS metadata */
+  function announceTrack(track: Track) {
     // Update preload caches (resolve remaining URLs + shift buffer window)
     _preloadAdjacent()
 
@@ -1109,6 +1140,227 @@ export const usePlayerStore = defineStore('player', () => {
     }
   }
 
+  // ── Hand-made transitions: player glue ─────────────────────────────────
+  function isLocalTrack(t: Track): boolean {
+    return t.source !== 'subsonic' && (t.path.startsWith('/') || /^[a-zA-Z]:[/\\]/.test(t.path))
+  }
+
+  /** Queue index that plays after the current track, or -1 */
+  function upcomingIndex(): number {
+    const idx = currentIndex.value + 1
+    if (idx < queue.value.length) return idx
+    return repeatMode.value === 'all' && queue.value.length > 0 ? 0 : -1
+  }
+
+  /** The track a transition may lead into, or null when the next track change isn't a plain "advance" */
+  function upcomingTrack(): Track | null {
+    if (repeatMode.value === 'one' || lrcSyncMode.value || sleepTimerMode.value === 'song') return null
+    const idx = upcomingIndex()
+    if (idx < 0) return null
+    const next = queue.value[idx]
+    if (sleepTimerMode.value === 'album' && next.album !== currentTrack.value?.album) return null
+    return next
+  }
+
+  function getTxEngine(): TransitionEngine | null {
+    if (txEngine) return txEngine
+    const bus = compressorNode ?? analyserNode
+    if (!audioCtx || !sourceNode || !mainFadeGain || !bus) return null
+    txEngine = new TransitionEngine({
+      ctx: audioCtx,
+      bus,
+      element: audio,
+      elementSource: sourceNode,
+      elementGain: mainFadeGain,
+      mediaUrl: (path) => window.api.getMediaUrl(path),
+      onCommit: (to, info) => commitTransitionState(to, info.duration),
+      onSettled: () => {
+        stopTxUiTimer()
+        duration.value = audio.duration || duration.value
+        currentTime.value = audio.currentTime
+        isLoading.value = false
+        isPlaying.value = !audio.paused
+      },
+      onHandbackFailed: async (to, position) => {
+        stopTxUiTimer()
+        console.warn('[Transitions] Handback failed, loading TO normally')
+        await loadTrack(to)
+        audio.currentTime = position
+        play()
+      },
+    })
+    txEngine.setVolume(isMuted.value ? 0 : volume.value * volume.value)
+    return txEngine
+  }
+
+  /** Called on every timeupdate of the main element: prepares and arms the transition into the next track. */
+  function transitionTick() {
+    if (!transitionsEnabled.value || usingStream || isCrossfading || !isPlaying.value) return
+    const eng = getTxEngine()
+    if (!eng || eng.active || eng.phase === 'preparing') return
+    const from = currentTrack.value
+    const to = upcomingTrack()
+    const t = from && to && isLocalTrack(from) && isLocalTrack(to) ? useTransitionsStore().find(from, to) : null
+    if (!from || !to || !t || t.needsReview || txSkip.has(t.id)) {
+      if (eng.phase === 'ready') eng.release()
+      return
+    }
+    if (eng.phase === 'ready' && !eng.isFor(t, from, to)) eng.release()
+
+    const untilExit = t.exitAt - audio.currentTime
+    const lead = leadInFor(t)
+    // Too close (or past it, e.g. after a seek): skip, but stay eligible if the user seeks back
+    if (untilExit < lead + 0.6) {
+      if (eng.phase === 'ready') eng.release()
+      return
+    }
+    if (eng.phase === 'idle' && untilExit <= PREP_WINDOW) {
+      eng.prepare(t, from, to).then(r => handlePrepareResult(t, from, to, r))
+    } else if (eng.phase === 'ready' && untilExit <= lead + MEASURE_LEAD) {
+      eng.arm().catch(err => {
+        console.error('[Transitions] arm failed:', err)
+        txSkip.add(t.id)
+      })
+    }
+  }
+
+  function handlePrepareResult(t: Transition, from: Track, to: Track, r: PrepareResult) {
+    if (r.ok) return
+    if (r.reason === 'error') {
+      if (r.error !== 'superseded') {
+        console.warn('[Transitions] Could not prepare transition:', r.error)
+        txSkip.add(t.id)
+      }
+      return
+    }
+    // A file's length changed. Flag for review only if it's the same file (or the original is gone):
+    // another song with the same artist/title (e.g. a live version) just doesn't get this transition.
+    txSkip.add(t.id)
+    const endpoint = r.side === 'from' ? t.from : t.to
+    const track = r.side === 'from' ? from : to
+    const originalStillThere = getLibStore()?.tracks?.some((x: Track) => x.path === endpoint.path)
+    if (track.path === endpoint.path || !originalStillThere) {
+      console.warn(`[Transitions] ${r.side.toUpperCase()} duration changed (${endpoint.duration.toFixed(2)}s → ${r.decoded.toFixed(2)}s): needs review`)
+      useTransitionsStore().setNeedsReview(t.id, true).catch(() => {})
+    }
+  }
+
+  /** TO has become the dominant side: make it the current track, as a normal track change would. */
+  function commitTransitionState(to: Track, decodedDuration: number) {
+    let idx = upcomingIndex()
+    if (idx < 0 || queue.value[idx]?.id !== to.id) idx = queue.value.findIndex(t => t.id === to.id)
+    if (idx < 0) {
+      // Removed from the queue mid-transition: it's playing, so put it back right after the current track
+      idx = currentIndex.value + 1
+      queue.value.splice(idx, 0, to)
+    }
+    txSkip.clear()
+    currentIndex.value = idx
+    currentTrack.value = to
+    duration.value = decodedDuration || to.duration || 0
+    currentTime.value = txEngine?.toPosition() ?? 0
+    pluginBus.emit('trackChange', { ...to })
+    announceTrack(to)
+    startTxUiTimer()
+  }
+
+  // While the engine plays TO from a buffer, drive the progress bar from its clock
+  function startTxUiTimer() {
+    stopTxUiTimer()
+    txUiTimer = setInterval(() => {
+      if (!txEngine?.ownsElement) { stopTxUiTimer(); return }
+      currentTime.value = txEngine.toPosition()
+    }, 250)
+  }
+
+  function stopTxUiTimer() {
+    if (txUiTimer) { clearInterval(txUiTimer); txUiTimer = null }
+  }
+
+  /** Bring the element's gain back once whatever replaces the transition has started (or soon anyway). */
+  function restoreElementGainSoon() {
+    const eng = txEngine
+    if (!eng) return
+    let done = false
+    const restore = () => {
+      if (done) return
+      done = true
+      for (const ev of ['loadstart', 'playing', 'seeked']) audio.removeEventListener(ev, restore)
+      eng.restoreElementGain()
+    }
+    for (const ev of ['loadstart', 'playing', 'seeked']) audio.addEventListener(ev, restore, { once: true })
+    setTimeout(restore, 1500)
+  }
+
+  /** Hard stop before a normal track load. Safe to call when nothing is happening. */
+  function abortTransition() {
+    txSkip.clear()
+    if (!txEngine) return
+    stopTxUiTimer()
+    if (txEngine.stop()) restoreElementGainSoon()
+  }
+
+  /**
+   * Stop the transition and leave TO on the element at `pos` (default: where it is now),
+   * playing or paused. Used when TO dominates and the user pauses, seeks, etc.
+   */
+  function parkOnTo(playAfter: boolean, pos?: number) {
+    const info = txEngine?.stop()
+    stopTxUiTimer()
+    if (!info) return
+    if (!info.committed) commitTransitionState(info.toTrack, info.toTrack.duration)
+    stopTxUiTimer()
+    const target = Math.max(0, pos ?? info.toPos)
+    if (!playAfter) audio.pause()
+    if (!info.elementHasTo) audio.src = window.api.getMediaUrl(info.toTrack.path)
+    audio.currentTime = target
+    currentTime.value = target
+    if (playAfter) audio.play().catch(() => {})
+    restoreElementGainSoon()
+  }
+
+  /** After a queue edit: keep an audible transition's target next in line, or back out if it was removed. */
+  function txQueueChanged() {
+    const eng = txEngine
+    if (!eng || eng.phase === 'idle' || eng.committed) return
+    if (eng.phase !== 'running') { eng.release(); return }
+    const to = eng.toTrack
+    if (!to) return
+    if (queue.value[upcomingIndex()]?.id === to.id) return
+    const idx = queue.value.findIndex(t => t.id === to.id)
+    if (idx < 0) {
+      if (!eng.collapseToFrom()) parkOnTo(true)
+      return
+    }
+    const [item] = queue.value.splice(idx, 1)
+    if (idx < currentIndex.value) currentIndex.value--
+    queue.value.splice(currentIndex.value + 1, 0, item)
+  }
+
+  function setTransitionsEnabled(enabled: boolean) {
+    transitionsEnabled.value = enabled
+    window.api.mergeSettings({ transitionsEnabled: enabled })
+    if (!enabled && txEngine && !txEngine.committed) txEngine.collapseToFrom()
+  }
+
+  /** Snapshot for the dev hook / debugging */
+  function transitionDebug() {
+    return {
+      phase: txEngine?.phase ?? 'no-engine',
+      transitionId: txEngine?.transition?.id ?? null,
+      committed: txEngine?.committed ?? false,
+      fromPosition: txEngine?.fromPosition(),
+      toPosition: txEngine?.toPosition(),
+      skipped: [...txSkip],
+      ...(txEngine?.debug ?? {}),
+    }
+  }
+
+  // Repeat-one means "stay on this song": back out of a transition that hasn't committed yet
+  watch(repeatMode, (mode) => {
+    if (mode === 'one' && txEngine && !txEngine.committed) txEngine.collapseToFrom()
+  })
+
   // ── Actions ──────────────────────────────────────────────────────────────
   async function play(track?: Track) {
     if (track) {
@@ -1131,6 +1383,13 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function pause() {
+    if (txEngine?.active) {
+      // Before the commit point FROM is still running on the element in sync: just back out to it.
+      // After it, TO is the current track: leave it on the element where it is.
+      if (!txEngine.committed && txEngine.collapseToFrom()) audio.pause()
+      else parkOnTo(false)
+      return
+    }
     activeAudio().pause()
     if (isCrossfading) audioNext.pause()
   }
@@ -1141,6 +1400,11 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function next() {
+    if (txEngine?.active && !txEngine.committed) {
+      // Mid-transition "next" means "get to TO now", which is already playing
+      if (txEngine.finishNow()) return
+      txEngine.collapseToFrom()
+    }
     cancelCrossfade()
     if (queue.value.length === 0) return
     let nextIdx = currentIndex.value + 1
@@ -1154,8 +1418,19 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function previous() {
+    // The element may hold the other song mid-transition, so its currentTime can't be trusted here
+    let skipRestart = false
+    if (txEngine?.active) {
+      if (!txEngine.committed && txEngine.collapseToFrom()) {
+        // Back on FROM, which is well past 3 s: the restart below handles it
+      } else {
+        const pos = txEngine.toPosition()
+        if (pos > 3 || !txEngine.committed) { parkOnTo(true, 0); return }
+        skipRestart = true
+      }
+    }
     cancelCrossfade()
-    if (activeAudio().currentTime > 3) {
+    if (!skipRestart && activeAudio().currentTime > 3) {
       activeAudio().currentTime = 0
       return
     }
@@ -1175,6 +1450,13 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function seek(time: number) {
+    if (txEngine?.active && (txEngine.committed || !txEngine.collapseToFrom())) {
+      // TO is current: put it back on the element at the requested spot
+      parkOnTo(isPlaying.value, time)
+      pluginBus.emit('seek', time)
+      sendDiscordUpdate()
+      return
+    }
     activeAudio().currentTime = time
     currentTime.value = time
     pluginBus.emit('seek', time)
@@ -1213,6 +1495,7 @@ export const usePlayerStore = defineStore('player', () => {
         currentIndex.value = queue.value.findIndex((t) => t.id === current.id)
       }
     }
+    txQueueChanged()
     _preloadAdjacent()
   }
 
@@ -1254,11 +1537,13 @@ export const usePlayerStore = defineStore('player', () => {
       await loadTrack(queue.value[currentIndex.value])
       play()
     } else {
+      txQueueChanged()
       _preloadAdjacent()
     }
   }
 
   function clearQueue() {
+    abortTransition()
     queue.value = []
     originalQueue.value = []
     currentIndex.value = -1
@@ -1284,6 +1569,7 @@ export const usePlayerStore = defineStore('player', () => {
     } else {
       queue.value.splice(index, 1)
       if (index < currentIndex.value) currentIndex.value--
+      txQueueChanged()
       _preloadAdjacent()
     }
   }
@@ -1312,6 +1598,7 @@ export const usePlayerStore = defineStore('player', () => {
     const insertAt = currentIndex.value + 1
     queue.value.splice(insertAt, 0, ...tracks)
     originalQueue.value.splice(insertAt, 0, ...tracks)
+    txQueueChanged()
     _preloadAdjacent()
   }
 
@@ -1330,6 +1617,7 @@ export const usePlayerStore = defineStore('player', () => {
     }
     queue.value.push(...tracks)
     originalQueue.value.push(...tracks)
+    txQueueChanged()
     _preloadAdjacent()
   }
 
@@ -1352,6 +1640,7 @@ export const usePlayerStore = defineStore('player', () => {
         currentIndex.value++
       }
     }
+    txQueueChanged()
     _preloadAdjacent()
   }
 
@@ -1661,6 +1950,11 @@ export const usePlayerStore = defineStore('player', () => {
     crossfadeDuration,
     setCrossfadeEnabled,
     setCrossfadeDuration,
+    // Hand-made transitions
+    transitionsEnabled,
+    setTransitionsEnabled,
+    upcomingTrack,
+    transitionDebug,
     // Scrobbling
     setScrobblingEnabled,
     // Playback error

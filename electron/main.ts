@@ -724,6 +724,50 @@ async function saveTags(): Promise<void> {
   await writeFile(tagsPath, JSON.stringify({ trackTags: trackTagsData, albumTags: albumTagsData }, null, 2))
 }
 
+// ── Hand-made transitions persistence ──────────────────────────────────────
+// User-authored song→song transitions, keyed by "fromSongKey→toSongKey".
+const transitionsPath = join(dataPath, 'transitions.json')
+let transitionsData: Record<string, any> = {}
+let transitionsLoaded = false
+
+async function loadTransitions(): Promise<Record<string, any>> {
+  if (transitionsLoaded) return transitionsData
+  try {
+    if (existsSync(transitionsPath)) {
+      const raw = JSON.parse(await readFile(transitionsPath, 'utf-8'))
+      transitionsData = raw.transitions || {}
+    }
+  } catch (err) {
+    logger.error('Failed to read transitions.json:', err)
+    transitionsData = {}
+  }
+  transitionsLoaded = true
+  return transitionsData
+}
+
+// Hand-made work is expensive to redo, so write via a temp file + rename (serialised,
+// like settings, because concurrent saves would share the .tmp name)
+let _transitionsSaveQueue: Promise<void> = Promise.resolve()
+
+function saveTransitions(): Promise<void> {
+  const run = _transitionsSaveQueue.then(async () => {
+    const tmp = transitionsPath + '.tmp'
+    await writeFile(tmp, JSON.stringify({ version: 1, transitions: transitionsData }, null, 2))
+    await rename(tmp, transitionsPath)
+  })
+  // A failed write must not wedge every later one
+  _transitionsSaveQueue = run.catch(() => {})
+  return run
+}
+
+function isValidTransition(t: any): boolean {
+  const num = (v: any) => typeof v === 'number' && isFinite(v)
+  return !!t && typeof t.id === 'string'
+    && typeof t.from?.key === 'string' && typeof t.to?.key === 'string'
+    && ['blend', 'cut', 'echo-out'].includes(t.type)
+    && num(t.exitAt) && num(t.entryAt) && num(t.overlap)
+}
+
 // ── Playlist persistence ───────────────────────────────────────────────────
 interface TrackMetaSnapshot {
   title: string
@@ -1816,6 +1860,28 @@ app.whenReady().then(async () => {
     albumTagsData = merged.albumTags
     await saveTags()
     return { trackTags: trackTagsData, albumTags: albumTagsData }
+  })
+
+  // ── IPC: Transitions ──
+  ipcMain.handle('transitions:get', async () => await loadTransitions())
+  ipcMain.handle('transitions:save', async (_, t: any) => {
+    await loadTransitions()
+    if (!isValidTransition(t)) throw new Error('Invalid transition')
+    // A pair holds one transition; drop any older copy of this id (e.g. its songKey changed)
+    for (const [k, v] of Object.entries(transitionsData)) {
+      if (v?.id === t.id) delete transitionsData[k]
+    }
+    transitionsData[`${t.from.key}→${t.to.key}`] = t
+    await saveTransitions()
+    return transitionsData
+  })
+  ipcMain.handle('transitions:delete', async (_, id: string) => {
+    await loadTransitions()
+    for (const [k, v] of Object.entries(transitionsData)) {
+      if (v?.id === id) delete transitionsData[k]
+    }
+    await saveTransitions()
+    return transitionsData
   })
 
   // ── IPC: Discord RPC ──
