@@ -2,6 +2,9 @@
 import type { BeatGrid } from '@/types/transition'
 import BeatgridWorker from './beatgrid.worker?worker&inline'
 
+/** Bump when analyzeBeats changes enough that cached grids should be recomputed */
+export const BEATGRID_VERSION = 1
+
 let worker: Worker | null = null
 let nextId = 0
 const pending = new Map<number, (grid: BeatGrid | null) => void>()
@@ -54,10 +57,12 @@ export async function getBeatGrid(path: string, buf: AudioBuffer, force = false)
   if (!force) {
     try {
       const cached = await window.api.getBeatGrid(path)
-      if (cached) return cached
+      if (cached && cached.version === BEATGRID_VERSION) return cached
     } catch { /* fall through to analysis */ }
   }
-  const grid = await analyzeBuffer(buf)
-  if (grid) window.api.saveBeatGrid(path, grid).catch(() => {})
+  const analysed = await analyzeBuffer(buf)
+  if (!analysed) return null
+  const grid = { ...analysed, version: BEATGRID_VERSION }
+  window.api.saveBeatGrid(path, grid).catch(() => {})
   return grid
 }

@@ -698,11 +698,12 @@ export const usePlayerStore = defineStore('player', () => {
     navigator.mediaSession.setActionHandler('seekto', (details) => {
       if (details.seekTime != null) seek(details.seekTime)
     })
+    // currentTime (not the element's) so these stay right while a transition owns the element
     navigator.mediaSession.setActionHandler('seekbackward', (details) => {
-      seek(Math.max(0, activeAudio().currentTime - (details.seekOffset || 10)))
+      seek(Math.max(0, currentTime.value - (details.seekOffset || 10)))
     })
     navigator.mediaSession.setActionHandler('seekforward', (details) => {
-      seek(Math.min(duration.value, activeAudio().currentTime + (details.seekOffset || 10)))
+      seek(Math.min(duration.value, currentTime.value + (details.seekOffset || 10)))
     })
   }
 
@@ -757,7 +758,7 @@ export const usePlayerStore = defineStore('player', () => {
       case 'next': next(); break
       case 'previous': previous(); break
       case 'stop': pause(); activeAudio().currentTime = 0; break
-      case 'seek': seek(Math.max(0, activeAudio().currentTime + (data || 0))); window.api.mprisSendSeeked(activeAudio().currentTime); break
+      case 'seek': seek(Math.max(0, currentTime.value + (data || 0))); window.api.mprisSendSeeked(currentTime.value); break
       case 'seekAbsolute': seek(data || 0); window.api.mprisSendSeeked(data || 0); break
       case 'volume': setVolume(data || 0); break
       case 'loop': {
@@ -1204,6 +1205,7 @@ export const usePlayerStore = defineStore('player', () => {
       onHandbackFailed: async (to, position) => {
         stopTxUiTimer()
         console.warn('[Transitions] Handback failed, loading TO normally')
+        restoreElementGainSoon()
         await loadTrack(to)
         audio.currentTime = position
         play()
@@ -1240,6 +1242,7 @@ export const usePlayerStore = defineStore('player', () => {
       eng.arm().catch(err => {
         console.error('[Transitions] arm failed:', err)
         txSkip.add(t.id)
+        eng.release()
       })
     }
   }
@@ -1317,7 +1320,9 @@ export const usePlayerStore = defineStore('player', () => {
     txSkip.clear()
     if (!txEngine) return
     stopTxUiTimer()
-    if (txEngine.stop()) restoreElementGainSoon()
+    const stopped = txEngine.stop()
+    // Also covers a transition that already gave up (e.g. a failed handback) with the element muted
+    if (stopped || (!isCrossfading && mainFadeGain && mainFadeGain.gain.value < 0.999)) restoreElementGainSoon()
   }
 
   /**
@@ -1332,7 +1337,11 @@ export const usePlayerStore = defineStore('player', () => {
     stopTxUiTimer()
     const target = Math.max(0, pos ?? info.toPos)
     if (!playAfter) audio.pause()
-    if (!info.elementHasTo) audio.src = window.api.getMediaUrl(info.toTrack.path)
+    if (!info.elementHasTo) {
+      audio.src = window.api.getMediaUrl(info.toTrack.path)
+      // Loading a new src drops the 'pause' event queued just above
+      if (!playAfter) { isPlaying.value = false; pluginBus.emit('pause') }
+    }
     audio.currentTime = target
     currentTime.value = target
     if (playAfter) audio.play().catch(() => {})
@@ -1343,8 +1352,11 @@ export const usePlayerStore = defineStore('player', () => {
   function txQueueChanged() {
     const eng = txEngine
     if (!eng || eng.phase === 'idle' || eng.committed) return
-    if (eng.phase !== 'running') { eng.release(); return }
     const to = eng.toTrack
+    if (eng.phase !== 'running') {
+      if (upcomingTrack()?.id !== to?.id) eng.release()
+      return
+    }
     if (!to) return
     if (queue.value[upcomingIndex()]?.id === to.id) return
     const idx = queue.value.findIndex(t => t.id === to.id)
@@ -1459,9 +1471,12 @@ export const usePlayerStore = defineStore('player', () => {
     }
   }
 
-  // Repeat-one means "stay on this song": back out of a transition that hasn't committed yet
-  watch(repeatMode, (mode) => {
-    if (mode === 'one' && txEngine && !txEngine.committed) txEngine.collapseToFrom()
+  // Repeat-one, a sleep timer or LRC sync mode can mean "don't move on to TO": back out of a
+  // transition that hasn't committed yet
+  watch([repeatMode, sleepTimerMode, lrcSyncMode], () => {
+    const eng = txEngine
+    if (!eng || eng.phase === 'idle' || eng.committed) return
+    if (upcomingTrack()?.id !== eng.toTrack?.id) eng.collapseToFrom()
   })
 
   // ── Actions ──────────────────────────────────────────────────────────────

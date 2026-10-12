@@ -57,4 +57,6 @@ export interface BeatGrid {
   downbeatPhase: number
   /** 0–1, how strongly the onset envelope agrees with the grid */
   confidence: number
+  /** Analyser version that produced it (cache entries from other versions are ignored) */
+  version?: number
 }

@@ -331,6 +331,17 @@ export class TransitionEngine {
    * Returns false if it's too late (the caller should skip this play-through).
    */
   async arm(): Promise<boolean> {
+    try {
+      return await this.armInner()
+    } catch (err) {
+      this.debug.lastError = `arm: ${err}`
+      if (this.phase === 'arming') this.reset()
+      else if (this.phase === 'running') this.collapseToFrom()
+      throw err
+    }
+  }
+
+  private async armInner(): Promise<boolean> {
     const p = this.plan
     if (!p || this.phase !== 'ready') return false
     this.phase = 'arming'
@@ -411,6 +422,8 @@ export class TransitionEngine {
     if (this.phase !== 'running' || !p?.graph || !s) return false
     const { ctx } = this.host
     const at = ctx.currentTime + LOOKAHEAD
+    // Before TO has started there's nothing to skip ahead to: let the caller back out instead
+    if (at < s.t0) return false
     const g = p.graph
     const fade = 0.15
     rampFromCurrent(g.fromOut.gain, at, 0, fade)
@@ -495,12 +508,13 @@ export class TransitionEngine {
     master.gain.linearRampToValueAtTime(0, endAt)
 
     const graph = buildTransitionGraph(ctx, buffers, s, fromBus, toBus)
-    graph.dispose(endAt + 0.02)
+    graph.toSource.stop(endAt + 0.02)
     let stopped = false
     const cleanup = () => {
       if (stopped) return
       stopped = true
       clearTimeout(endTimer)
+      graph.dispose(ctx.currentTime + 0.04)
       setTimeout(() => { for (const n of [master, fromBus, toBus]) n.disconnect() }, 100)
       if (this.previewHandle === handle) this.previewHandle = null
     }
@@ -510,9 +524,7 @@ export class TransitionEngine {
       setSolo: (solo) => { if (!stopped) applySolo(solo, ctx.currentTime + 0.01) },
       stop: () => {
         if (stopped) return
-        const now = ctx.currentTime
-        rampFromCurrent(master.gain, now, 0, 0.03)
-        graph.dispose(now + 0.04)
+        rampFromCurrent(master.gain, ctx.currentTime, 0, 0.03)
         cleanup()
       },
     }
@@ -537,6 +549,15 @@ export class TransitionEngine {
   }
 
   private async handback() {
+    try {
+      await this.handbackInner()
+    } catch (err) {
+      console.error('[Transitions] handback failed:', err)
+      if (this.phase === 'handback') this.failHandback()
+    }
+  }
+
+  private async handbackInner() {
     const p = this.plan
     const s = p?.schedule
     if (!p || !s || this.phase !== 'running') return
@@ -676,9 +697,12 @@ export class TransitionEngine {
     }
   }
 
-  private capture(frames: number): Promise<{ startFrame: number; samples: Float32Array } | null> {
+  private async capture(frames: number): Promise<{ startFrame: number; samples: Float32Array } | null> {
     const tap = this.tap
-    if (!tap || this.capturing) return Promise.resolve(null)
+    if (!tap) return null
+    // A capture abandoned by a cancelled arm can still be running; it finishes within ~0.4 s
+    for (let i = 0; i < 40 && this.capturing; i++) await sleep(25)
+    if (this.capturing) return null
     this.capturing = true
     return new Promise(resolve => {
       const finish = (v: { startFrame: number; samples: Float32Array } | null) => {

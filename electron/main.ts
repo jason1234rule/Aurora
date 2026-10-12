@@ -762,6 +762,8 @@ async function loadTransitions(): Promise<Record<string, any>> {
   } catch (err) {
     logger.error('Failed to read transitions.json:', err)
     transitionsData = {}
+    // Keep the unreadable file so hand-made work isn't lost to the next save
+    try { await rename(transitionsPath, `${transitionsPath}.corrupt-${Date.now()}`) } catch {}
   }
   transitionsLoaded = true
   return transitionsData

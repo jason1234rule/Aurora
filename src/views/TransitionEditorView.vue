@@ -335,7 +335,7 @@
 
 <script setup lang="ts">
 import { ref, computed, shallowRef, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
-import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
+import { useRoute, useRouter, onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
 import { usePlayerStore } from '@/stores/player'
 import { useLibraryStore } from '@/stores/library'
 import { useTransitionsStore } from '@/stores/transitions'
@@ -760,12 +760,16 @@ function resolveLeave(ok: boolean) {
   leaveResolver = null
 }
 
-onBeforeRouteLeave(async () => {
+function confirmDiscard(): boolean | Promise<boolean> {
   stopPreview()
   if (!dirty.value || status.value !== 'ready') return true
   showLeave.value = true
   return new Promise<boolean>(resolve => { leaveResolver = resolve })
-})
+}
+
+onBeforeRouteLeave(confirmDiscard)
+// Opening another transition from the queue panel reuses this view
+onBeforeRouteUpdate(confirmDiscard)
 </script>
 
 <style scoped>

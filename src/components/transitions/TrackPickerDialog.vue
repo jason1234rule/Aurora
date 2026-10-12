@@ -78,7 +78,7 @@ watch(() => props.show, (open) => {
   if (!open) return
   query.value = ''
   nextTick(() => inputRef.value?.focus())
-})
+}, { immediate: true })
 
 function pick(t: Track) {
   emit('pick', t)
