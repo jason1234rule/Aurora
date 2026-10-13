@@ -5,15 +5,17 @@
  *   __aurora.addTransition({ exitAt: 182.5, entryAt: 12.3, overlap: 16 })   // current → next in queue
  *   __aurora.jumpToTransition(10)                                           // seek to 10 s before exitAt
  *   __aurora.transitionState()                                              // engine phase + alignment stats
+ *   __aurora.stretchTimings()                                               // recent time-stretch renders
  */
 import type { Transition } from '@/types/transition'
 import { usePlayerStore } from '@/stores/player'
 import { useTransitionsStore } from '@/stores/transitions'
 import { useLibraryStore } from '@/stores/library'
+import { stretchTimings } from './stretch/client'
 
 type AddOptions = Partial<Pick<Transition,
   'type' | 'exitAt' | 'entryAt' | 'overlap' | 'fadeOut' | 'fadeIn' | 'fadeOutPoints' | 'fadeInPoints'
-  | 'bassSwap' | 'filter' | 'echo' | 'rateTo'>> & {
+  | 'bassSwap' | 'filter' | 'echo' | 'rateTo' | 'rateFrom' | 'pitch' | 'stretch' | 'rampBack'>> & {
   /** 'next' (default) = the track after the current one in the queue; otherwise a track id or "Artist - Title" */
   to?: string
 }
@@ -76,6 +78,8 @@ export function installTransitionDevHook() {
       if (!player.isPlaying) player.play()
     },
     transitionState: () => player.transitionDebug(),
+    /** Seconds of audio rendered and milliseconds taken, for the last few time-stretch jobs */
+    stretchTimings: () => [...stretchTimings],
   }
 
   ;(window as any).__aurora = { ...((window as any).__aurora || {}), ...api }

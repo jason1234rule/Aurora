@@ -31,6 +31,8 @@ export const DEFAULT_RAMP_BACK_BARS = 8
 export const DEFAULT_RAMP_BACK_SECONDS = 8
 /** FROM's ramp into the overlap is capped so the engine can still prepare it in time */
 export const MAX_FROM_RAMP = 16
+/** FROM's ramp starts at least this far into the file (covers the engine's longest lead-in before it) */
+const FROM_RAMP_HEADROOM = 3
 export const DEFAULT_ECHO = { delay: 0.375, feedback: 0.5 }
 
 export type ParamEvent =
@@ -120,10 +122,32 @@ export function rampBackOf(t: Pick<Transition, 'rampBack'>): number {
   return r !== undefined && isFinite(r) ? clamp(r, 0.5, 60) : DEFAULT_RATE_RAMP
 }
 
-/** Seconds FROM takes to reach its overlap speed before the exit (0 when it doesn't change) */
-export function fromRampIn(t: Pick<Transition, 'type' | 'overlap' | 'rateFrom' | 'rampBack'>): number {
-  if (effectiveOverlap(t) === 0 || clampRate(t.rateFrom) === 1) return 0
-  return Math.min(rampBackOf(t), MAX_FROM_RAMP)
+/**
+ * Seconds FROM takes to reach its overlap speed before the exit (0 when it doesn't change).
+ * Shortened near the start of the file so FROM's buffer (which starts a little before the
+ * ramp) never has to start before position 0.
+ */
+export function fromRampIn(t: Pick<Transition, 'type' | 'overlap' | 'exitAt' | 'rateFrom' | 'rampBack'>): number {
+  const rateFrom = clampRate(t.rateFrom)
+  if (effectiveOverlap(t) === 0 || rateFrom === 1) return 0
+  const room = Math.max(0, (t.exitAt - FROM_RAMP_HEADROOM) * 2 / (1 + rateFrom))
+  return Math.min(rampBackOf(t), MAX_FROM_RAMP, room)
+}
+
+/**
+ * Events for an equal-power swap between two sides that carry the same music but not the
+ * same waveform (a time-stretched buffer against the original), made of linear segments
+ * so the param stays safe to cancel and re-automate.
+ */
+export function equalPowerEvents(start: number, dur: number, rising: boolean, from = rising ? 0 : 1, to = rising ? 1 : 0): ParamEvent[] {
+  const n = 8
+  const events: ParamEvent[] = [{ type: 'set', time: start, value: from }]
+  for (let k = 1; k <= n; k++) {
+    const x = k / n
+    const shape = rising ? Math.sin(x * Math.PI / 2) : 1 - Math.cos(x * Math.PI / 2)
+    events.push({ type: 'linear', time: start + x * dur, value: from + (to - from) * shape })
+  }
+  return events
 }
 
 /** The overlap actually used: 0 for cuts, and blends shorter than MIN_OVERLAP become cuts. */
@@ -306,7 +330,7 @@ export function buildSchedule(t: TransitionTiming, opts: ScheduleOptions): Trans
   const pre = opts.prerendered ?? {}
 
   // FROM eases into its overlap speed over the ramp before t0, then holds it
-  const rampIn = rateFrom === 1 ? 0 : Math.min(rateRamp, MAX_FROM_RAMP)
+  const rampIn = rateFrom === 1 ? 0 : fromRampIn(t)
   const fromRate: RatePoint[] = rateFrom === 1 ? [] : [{ time: t0 - rampIn, rate: 1 }, { time: t0, rate: rateFrom }]
 
   // FROM starts leadIn before t0; if that is before the file start, start later at offset 0
@@ -325,7 +349,11 @@ export function buildSchedule(t: TransitionTiming, opts: ScheduleOptions): Trans
 
   const elementGain: ParamEvent[] = []
   const fromGain: ParamPlan = { initial: swapIn === undefined ? 1 : 0, events: [] }
-  if (swapIn !== undefined) {
+  if (swapIn !== undefined && pre.from) {
+    // A stretched FROM matches the element in time but not sample for sample: keep the power steady
+    elementGain.push(...equalPowerEvents(fromStartAt, swapIn, false))
+    fromGain.events.push(...equalPowerEvents(fromStartAt, swapIn, true))
+  } else if (swapIn !== undefined) {
     elementGain.push({ type: 'set', time: fromStartAt, value: 1 }, { type: 'linear', time: fromStartAt + swapIn, value: 0 })
     // FROM buffer and element carry the same audio, so a linear (amplitude-preserving) swap is right
     fromGain.events.push({ type: 'set', time: fromStartAt, value: 0 }, { type: 'linear', time: fromStartAt + swapIn, value: 1 })

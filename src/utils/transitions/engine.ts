@@ -15,17 +15,26 @@
  *   5. handback: the element is switched to TO, measured against the TO
  *      buffer, nudged into sample alignment (muted, via playbackRate), then a
  *      second short swap hands TO back to the element.
+ *
+ * With pitch 'keep', prepare also renders time-stretched copies of the parts
+ * that change speed (in a worker, see stretch/). Those play at rate 1 from
+ * their first sample and follow the same tempo envelope, so measuring,
+ * positions and the handback work exactly as with resampling.
  */
 import type { Transition } from '@/types/transition'
 import {
-  buildSchedule, toPositionAt, fromPositionAt, rampRateToUnity, effectiveOverlap, applyParamEvents,
-  planValueAt, rateAt, type TransitionSchedule, type TransitionTiming,
+  buildSchedule, toPositionAt, toTimeAt, fromPositionAt, rampRateToUnity, applyParamEvents,
+  planValueAt, rateAt, fromRampIn, equalPowerEvents, type TransitionSchedule, type TransitionTiming,
 } from './schedule'
 import { buildTransitionGraph, type TransitionGraph } from './graph'
 import { findAlignment, mixToMono } from './align'
+import { stretchPlan, renderPlan, type StretchRenderer } from './stretch/plan'
+import { stretchInWorker } from './stretch/client'
 
 /** Start decoding this long before exitAt */
 export const PREP_WINDOW = 30
+/** At least this long between starting to prepare and arming (decoding plus time-stretching) */
+const PREP_TIME = 12
 /** FROM's buffer takes over this long before exitAt */
 export const LEAD_IN = 1.0
 /** Measure the element this long before the FROM buffer takes over */
@@ -73,6 +82,8 @@ export interface PreviewOptions {
   postRoll: number
   solo: PreviewSolo
   onEnded?: () => void
+  /** Pre-stretched sections from previewStretchPlan (pitch 'keep'); missing ones play resampled */
+  stretched?: { from?: AudioBuffer; to?: AudioBuffer }
 }
 
 export interface PreviewHandle {
@@ -95,6 +106,8 @@ export interface EngineDebug {
   /** ctx times of the last armed transition */
   times?: { t0: number; swapIn: number; commitAt: number; overlapEnd: number; settledAt: number }
   handback?: { iterations: number; finalDeltaMs: number | null; converged: boolean; steps: string[] }
+  /** Last prepare's time-stretch (pitch 'keep'): which sides, seconds of output, how long it took */
+  stretch?: { from: boolean; to: boolean; seconds: number; ms: number }
   lastError?: string
 }
 
@@ -111,6 +124,9 @@ interface Plan {
   toDuration: number
   fromMono?: Float32Array
   toMono?: Float32Array
+  /** Time-stretched sections (pitch 'keep'), each starting at its source's start time */
+  fromPlay?: AudioBuffer
+  toPlay?: AudioBuffer
   schedule?: TransitionSchedule
   graph?: TransitionGraph
   commitAt?: number
@@ -133,8 +149,31 @@ export async function decodeWindow(ctx: BaseAudioContext, url: string, start = 0
   return { buffer: win, start: s / sr, duration: full.duration }
 }
 
+/** How long before exitAt FROM's buffer takes over: before FROM starts changing speed, if it does */
 export function leadInFor(t: Transition): number {
-  return t.type === 'echo-out' ? Math.max(LEAD_IN, (t.echo?.delay ?? 0.375) + 0.3) : LEAD_IN
+  const base = t.type === 'echo-out' ? Math.max(LEAD_IN, (t.echo?.delay ?? 0.375) + 0.3) : LEAD_IN
+  return base + fromRampIn(t)
+}
+
+/** Start preparing this long before exitAt */
+export function prepWindowFor(t: Transition): number {
+  return Math.max(PREP_WINDOW, leadInFor(t) + MEASURE_LEAD + PREP_TIME)
+}
+
+/** Preview pre-roll actually used (it can't start before the file does) */
+function previewPreRoll(t: TransitionTiming, preRoll: number): number {
+  return Math.max(0, Math.min(preRoll, t.exitAt))
+}
+
+/**
+ * What a preview with these options needs time-stretched (empty unless pitch is 'keep'
+ * and a song changes speed). Render it with renderPlan and pass the result as
+ * PreviewOptions.stretched; the same options must be used for both.
+ */
+export function previewStretchPlan(t: TransitionTiming, opts: Pick<PreviewOptions, 'preRoll' | 'postRoll'>) {
+  const preRoll = previewPreRoll(t, opts.preRoll)
+  const s = buildSchedule(t, { t0: preRoll, leadIn: preRoll, fromWindowStart: 0, toWindowStart: 0 })
+  return stretchPlan(s, s.overlapEnd + opts.postRoll + 0.1)
 }
 
 const TAP_PROCESSOR = `
@@ -189,6 +228,13 @@ function rampFromCurrent(param: AudioParam, at: number, to: number, dur: number)
   rampParam(param, at, param.value, to, dur)
 }
 
+/** Equal-power version of rampFromCurrent, for swapping between a stretched buffer and the element */
+function swapFromCurrent(param: AudioParam, at: number, to: number, dur: number) {
+  const from = param.value
+  param.cancelScheduledValues(at)
+  applyParamEvents(param, equalPowerEvents(at, dur, to > from, from, to))
+}
+
 function waitForMedia(el: HTMLMediaElement, ok: string, timeoutMs: number): Promise<boolean> {
   return new Promise(resolve => {
     const done = (v: boolean) => {
@@ -219,7 +265,7 @@ export class TransitionEngine {
   /** Decoded buffers kept after a back-out so re-arming the same pair needn't decode again */
   private cache: { key: string; plan: Plan } | null = null
 
-  constructor(private host: EngineHost) {
+  constructor(private host: EngineHost, private stretch: StretchRenderer = stretchInWorker) {
     this.out = host.ctx.createGain()
     this.out.connect(host.bus)
   }
@@ -286,13 +332,14 @@ export class TransitionEngine {
     const { ctx } = this.host
     try {
       const lead = leadInFor(t)
-      const overlap = effectiveOverlap(t)
-      // Relative timing doesn't depend on t0, so a dry run tells us how much TO the handback needs
+      // Relative timing doesn't depend on t0, so a dry run tells us how much of each song is needed
       const dry = buildSchedule(t, { t0: 0, leadIn: lead, fromWindowStart: -1e9, toWindowStart: -1e9 })
-      const toEnd = toPositionAt(dry, dry.settledAt) + HANDBACK_BUDGET
+      const toUntil = dry.settledAt + HANDBACK_BUDGET
+      const toEnd = toPositionAt(dry, toUntil) + 0.5
 
       const fromDec = await decodeWindow(ctx, this.host.mediaUrl(from.path),
-        t.exitAt - lead - MEASURE_LEAD - 1.5, t.exitAt + overlap + 0.5)
+        Math.min(t.exitAt - lead - MEASURE_LEAD - 1.5, dry.from.startPos - 0.5),
+        fromPositionAt(t.exitAt, dry, dry.from.stopAt) + 0.5)
       if (token !== this.token) return { ok: false, reason: 'error', error: 'superseded' }
       if (Math.abs(fromDec.duration - t.from.duration) > 0.5) {
         this.reset()
@@ -306,11 +353,34 @@ export class TransitionEngine {
         return { ok: false, reason: 'mismatch', side: 'to', decoded: toDec.duration }
       }
 
+      // Pitch 'keep': render the parts that change speed now, so arming stays instant
+      let stretched: { from?: AudioBuffer; to?: AudioBuffer } = {}
+      const sp = stretchPlan(dry, toUntil)
+      if (sp.from || sp.to) {
+        const started = performance.now()
+        try {
+          stretched = await renderPlan(ctx, sp, {
+            from: { buffer: fromDec.buffer, start: fromDec.start },
+            to: { buffer: toDec.buffer, start: toDec.start },
+          }, this.stretch)
+          this.debug.stretch = {
+            from: !!stretched.from, to: !!stretched.to,
+            seconds: (sp.from?.duration ?? 0) + (sp.to?.duration ?? 0), ms: Math.round(performance.now() - started),
+          }
+        } catch (err) {
+          // Still worth playing: the speed change falls back to resampling (pitch moves with it)
+          console.warn('[Transitions] Time-stretch failed, resampling instead:', err)
+          this.debug.lastError = `stretch: ${err}`
+        }
+        if (token !== this.token) return { ok: false, reason: 'error', error: 'superseded' }
+      }
+
       this.plan = {
         transition: t, fromTrack: from, toTrack: to,
         fromBuf: fromDec.buffer, toBuf: toDec.buffer,
         fromWin: fromDec.start, toWin: toDec.start,
         fromDuration: fromDec.duration, toDuration: toDec.duration,
+        fromPlay: stretched.from, toPlay: stretched.to,
         committed: false,
       }
       this.cache = { key: cacheKey, plan: this.plan }
@@ -357,13 +427,18 @@ export class TransitionEngine {
     const m = await this.measure(p.fromMono, p.fromWin, element.currentTime)
     if (token !== this.token) return false
 
+    // Until FROM starts changing speed its buffer runs at rate 1 like the element, at file
+    // position (time − t0) + k. Solving that against the measurement gives t0 (k = exitAt
+    // when FROM keeps its speed).
+    const dry = buildSchedule(t, { t0: 0, leadIn: lead, fromWindowStart: -1e9, toWindowStart: -1e9 })
+    const k = fromPositionAt(t.exitAt, dry, dry.from.startAt) - dry.from.startAt
     let t0: number
     if (m) {
-      t0 = m.frame / sr + (t.exitAt - m.pos)
+      t0 = m.frame / sr - m.pos + k
       this.debug.arm = { method: 'measured', score: m.score, elementOffsetMs: (element.currentTime - (m.pos + (ctx.currentTime - m.frame / sr))) * 1000 }
     } else {
       // No worklet or no confident match (e.g. muted): trust currentTime and hope
-      t0 = ctx.currentTime + (t.exitAt - element.currentTime)
+      t0 = ctx.currentTime - element.currentTime + k
       this.debug.arm = { method: 'estimated' }
     }
 
@@ -375,9 +450,10 @@ export class TransitionEngine {
 
     const s = buildSchedule(t, {
       t0, leadIn: lead, fromWindowStart: p.fromWin, toWindowStart: p.toWin, swapIn: SWAP, sampleRate: sr,
+      prerendered: { from: !!p.fromPlay, to: !!p.toPlay },
     })
     p.schedule = s
-    p.graph = buildTransitionGraph(ctx, { from: p.fromBuf, to: p.toBuf }, s, this.out)
+    p.graph = buildTransitionGraph(ctx, { from: p.fromPlay ?? p.fromBuf, to: p.toPlay ?? p.toBuf }, s, this.out)
     const eg = this.host.elementGain.gain
     eg.cancelScheduledValues(now)
     eg.setValueAtTime(1, now)
@@ -407,10 +483,28 @@ export class TransitionEngine {
   collapseToFrom(): boolean {
     if (this.phase === 'preparing' || this.phase === 'ready' || this.phase === 'arming') { this.reset(); return true }
     const p = this.plan
-    if (this.phase !== 'running' || !p?.graph || p.committed || this.host.element.ended) return false
+    const s = p?.schedule
+    const el = this.host.element
+    if (this.phase !== 'running' || !p?.graph || !s || p.committed || el.ended) return false
     const at = this.host.ctx.currentTime + LOOKAHEAD
-    rampFromCurrent(this.host.elementGain.gain, at, 1, SWAP)
-    this.fadeGraph(at, SWAP)
+    const diverged = at > s.fromRampStart
+    if (!diverged && !p.fromPlay) {
+      // The element still plays exactly what the FROM buffer plays
+      rampFromCurrent(this.host.elementGain.gain, at, 1, SWAP)
+      this.fadeGraph(at, SWAP)
+    } else {
+      // A stretched FROM matches the element in time but not sample for sample. Once FROM has
+      // changed speed it doesn't even match in time: put the element where FROM is heard and
+      // crossfade a little longer to cover the seek. Not sample-exact, but backing out is the
+      // listener's own call.
+      const delay = diverged ? 0.05 : 0
+      const fade = diverged ? 0.12 : SWAP
+      if (diverged) el.currentTime = Math.min(p.fromDuration, fromPositionAt(p.transition.exitAt, s, at + delay))
+      swapFromCurrent(this.host.elementGain.gain, at + delay, 1, fade)
+      swapFromCurrent(p.graph.fromOut.gain, at, 0, fade + delay)
+      rampFromCurrent(p.graph.toOut.gain, at, 0, fade + delay)
+      p.graph.dispose(at + fade + delay + 0.01)
+    }
     this.reset(true)
     return true
   }
@@ -436,14 +530,19 @@ export class TransitionEngine {
       rampParam(g.toFilter.frequency, at, planValueAt(s.filter.frequency, at), neutral, fade, true)
     }
     try { g.fromSource.stop(at + fade + 0.01) } catch { /* already stopped */ }
-    const rateRamp = 0.5
-    if (s.toRate.length) {
+    let handAt = at + fade + 0.05
+    if (p.toPlay) {
+      // A stretched TO can't change course: it eases back to its own speed as planned
+      handAt = Math.max(handAt, s.settledAt)
+    } else if (s.toRate.length) {
+      const rateRamp = 0.5
       rampParam(g.toSource.playbackRate, at, rateAt(s.toRate, at), 1, rateRamp)
       s.toRate = rampRateToUnity(s.toRate, at, rateRamp)
+      handAt = Math.max(handAt, at + rateRamp + 0.05)
     }
     this.clearTimers()
     if (!p.committed) this.commit()
-    this.at(at + Math.max(rateRamp, fade) + 0.05, () => { this.handback() })
+    this.at(handAt, () => { this.handback() })
     return true
   }
 
@@ -485,10 +584,14 @@ export class TransitionEngine {
   preview(buffers: { from: AudioBuffer; to: AudioBuffer }, t: TransitionTiming, opts: PreviewOptions): PreviewHandle {
     this.stopPreview()
     const { ctx } = this.host
-    const preRoll = Math.max(0, Math.min(opts.preRoll, t.exitAt))
+    const preRoll = previewPreRoll(t, opts.preRoll)
     const startAt = ctx.currentTime + 0.08
     const t0 = startAt + preRoll
-    const s = buildSchedule(t, { t0, leadIn: preRoll, fromWindowStart: 0, toWindowStart: 0, sampleRate: ctx.sampleRate })
+    const st = opts.stretched ?? {}
+    const s = buildSchedule(t, {
+      t0, leadIn: preRoll, fromWindowStart: 0, toWindowStart: 0, sampleRate: ctx.sampleRate,
+      prerendered: { from: !!st.from, to: !!st.to },
+    })
     const endAt = s.overlapEnd + opts.postRoll
 
     const master = ctx.createGain()
@@ -507,7 +610,7 @@ export class TransitionEngine {
     master.gain.setValueAtTime(1, Math.max(startAt, endAt - 0.4))
     master.gain.linearRampToValueAtTime(0, endAt)
 
-    const graph = buildTransitionGraph(ctx, buffers, s, fromBus, toBus)
+    const graph = buildTransitionGraph(ctx, { from: st.from ?? buffers.from, to: st.to ?? buffers.to }, s, fromBus, toBus)
     graph.toSource.stop(endAt + 0.02)
     let stopped = false
     const cleanup = () => {
@@ -567,7 +670,7 @@ export class TransitionEngine {
     const { ctx, element } = this.host
     const sr = ctx.sampleRate
     // Past this ctx time the TO buffer runs out, so swap no matter what
-    const deadline = s.to.startAt + (p.toWin + p.toBuf.duration - s.to.startPos) - 1.0
+    const deadline = (p.toPlay ? s.to.startAt + p.toPlay.duration : toTimeAt(s, p.toWin + p.toBuf.duration)) - 1.0
 
     element.src = this.host.mediaUrl(p.toTrack.path)
     const loaded = await waitForMedia(element, 'canplay', 4000)
@@ -618,9 +721,15 @@ export class TransitionEngine {
 
     const at = ctx.currentTime + LOOKAHEAD
     const g = p.graph!
-    // Same audio on both sides now, so a linear (amplitude-preserving) swap
-    rampFromCurrent(g.toOut.gain, at, 0, SWAP)
-    rampFromCurrent(this.host.elementGain.gain, at, 1, SWAP)
+    if (p.toPlay) {
+      // A stretched TO lines up with the element in time but not in phase: equal power
+      swapFromCurrent(g.toOut.gain, at, 0, SWAP)
+      swapFromCurrent(this.host.elementGain.gain, at, 1, SWAP)
+    } else {
+      // Same audio on both sides now, so a linear (amplitude-preserving) swap
+      rampFromCurrent(g.toOut.gain, at, 0, SWAP)
+      rampFromCurrent(this.host.elementGain.gain, at, 1, SWAP)
+    }
     g.dispose(at + SWAP + 0.01)
     await sleep((LOOKAHEAD + SWAP + 0.06) * 1000)
     if (token !== this.token) return

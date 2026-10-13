@@ -33,6 +33,14 @@ const SCENARIOS = [
   'sr=48000&scenario=next-mid',
   'sr=44100&scenario=next-mid',
   'sr=48000&scenario=collapse',
+  // Pitch-preserving stretch (pre-rendered in the worker)
+  'sr=48000&pitch=keep&rampBack=4',
+  'sr=44100&pitch=keep&rampBack=4',
+  'sr=48000&pitch=keep&stretch=meet&rampBack=4',
+  'sr=44100&pitch=keep&stretch=meet&rampBack=4',
+  'sr=48000&pitch=keep&rampBack=4&scenario=next-mid',
+  'sr=48000&pitch=keep&stretch=meet&rampBack=4&scenario=collapse',
+  'sr=48000&pitch=vinyl&stretch=meet&rampBack=4',
 ]
 
 // ── Test material ─────────────────────────────────────────────────────────
@@ -78,7 +86,26 @@ const fromBeats = writeClickWav(join(work, 'from.wav'), 40, 120, 0.37, 'L', 7)
 const toBeats = writeClickWav(join(work, 'to.wav'), 40, toBpm, 0.11, 'R', 9)
 writeFileSync(join(work, 'beats.json'), JSON.stringify({ fromBeats, toBeats, toBpm }))
 writeFileSync(join(work, 'index.html'), '<!doctype html><html><body><script src="/harness.js"></script></body></html>')
-await build({ entryPoints: [join(here, 'harness.ts')], bundle: true, format: 'iife', outfile: join(work, 'harness.js'), logLevel: 'error' })
+// Vite's `?worker&inline` imports, rebuilt for esbuild: bundle the worker and start it from a blob
+const inlineWorkers = {
+  name: 'inline-workers',
+  setup(b) {
+    b.onResolve({ filter: /\?worker&inline$/ }, args => ({
+      path: join(args.resolveDir, args.path.replace(/\?worker&inline$/, '') + '.ts'), namespace: 'inline-worker',
+    }))
+    b.onLoad({ filter: /.*/, namespace: 'inline-worker' }, async args => {
+      const r = await build({ entryPoints: [args.path], bundle: true, format: 'iife', write: false, logLevel: 'error' })
+      return {
+        contents: `const code = ${JSON.stringify(r.outputFiles[0].text)}
+export default class InlineWorker extends Worker {
+  constructor() { super(URL.createObjectURL(new Blob([code], { type: 'application/javascript' }))) }
+}`,
+        loader: 'js',
+      }
+    })
+  },
+}
+await build({ entryPoints: [join(here, 'harness.ts')], bundle: true, format: 'iife', outfile: join(work, 'harness.js'), logLevel: 'error', plugins: [inlineWorkers] })
 
 // ── Static server with Range support (media elements need it to seek) ─────
 const types = { '.html': 'text/html', '.js': 'application/javascript', '.wav': 'audio/wav', '.json': 'application/json' }
@@ -106,6 +133,9 @@ function clickPeaks(x, startTime, sampleRate) {
   for (let i = 1; i < x.length - 1; i++) {
     const v = Math.abs(x[i])
     if (v > 0.2 && v >= Math.abs(x[i - 1]) && v > Math.abs(x[i + 1])) {
+      // A time-stretched click can ring a little before its main peak: take the largest within 2 ms
+      for (let j = i + 1; j < Math.min(x.length - 1, i + 0.002 * sampleRate); j++) if (Math.abs(x[j]) > Math.abs(x[i])) i = j
+      const v = Math.abs(x[i])
       const a = Math.abs(x[i - 1]), c = Math.abs(x[i + 1]), d = a - 2 * v + c
       out.push(startTime + (i + (d ? 0.5 * (a - c) / d : 0)) / sampleRate)
       i += Math.round(0.05 * sampleRate)
@@ -142,14 +172,21 @@ function analyze(r) {
   }
   const start = first / sr
   const s = r.schedule
-  const fromExpected = fromBeats.map(b => s.t0 + (b - r.exitAt))
+  // Where FROM's clicks are heard, following its tempo envelope (rate 1 unless it changes speed)
+  const fromExpected = r.fromBeatTimes
   const Lp = clickPeaks(L, start, sr), Rp = clickPeaks(R, start, sr)
   const segments = {
     'FROM on element, before swap-in': errorsMs(Lp, fromExpected, start, s.fromStartAt - 0.01),
   }
   if (r.collapseAt) {
     segments['FROM on buffer, before back-out'] = errorsMs(Lp, fromExpected, s.fromStartAt + 0.05, r.collapseAt)
-    segments['FROM on element, after back-out'] = errorsMs(Lp, fromExpected, r.collapseAt + 0.1, Infinity)
+    if (r.diverged) {
+      // FROM had changed speed, so the element was re-seeked: it only has to be steady on its own grid
+      const after = Lp.filter(p => p > r.collapseAt + 0.3)
+      segments['FROM on element, after back-out (own grid)'] = errorsMs(after, after.map((_, i) => after[0] + i * 0.5), -Infinity, Infinity)
+    } else {
+      segments['FROM on element, after back-out'] = errorsMs(Lp, fromExpected, r.collapseAt + 0.1, Infinity)
+    }
   } else {
     // Echo-out: after the dry cut the left channel is echo repeats, which are off-grid by design
     segments['FROM on buffer'] = errorsMs(Lp, fromExpected, s.fromStartAt + 0.05, r.type === 'echo-out' ? s.t0 : s.overlapEnd)
@@ -170,7 +207,9 @@ function analyze(r) {
   }
   if (r.collapseAt) {
     let mx = 0
-    for (let i = Math.round((r.collapseAt + 0.1 - start) * sr); i < n; i++) mx = Math.max(mx, Math.abs(R[i]))
+    // The re-seek path fades over a little longer
+    const quietFrom = r.collapseAt + (r.diverged ? 0.3 : 0.1)
+    for (let i = Math.round((quietFrom - start) * sr); i < n; i++) mx = Math.max(mx, Math.abs(R[i]))
     const pass = mx < 1e-4
     ok &&= pass
     lines.push(`  ${pass ? '✓' : '✗'} TO silent after back-out (peak ${mx.toExponential(1)})`)
@@ -193,7 +232,8 @@ for (const q of process.argv[2] ? [process.argv[2]] : SCENARIOS) {
   const { ok, lines } = analyze(r)
   if (!ok) failures++
   const hb = r.debug.handback
-  console.log(`${ok ? '✓' : '✗'} ${q}  (arm: ${r.debug.arm?.method}${hb ? `, handback: ${hb.converged ? 'converged' : 'NOT converged'} in ${hb.iterations} seeks` : ''})`)
+  const prep = r.log.find(l => l.startsWith('prepare took'))
+  console.log(`${ok ? '✓' : '✗'} ${q}  (arm: ${r.debug.arm?.method}${hb ? `, handback: ${hb.converged ? 'converged' : 'NOT converged'} in ${hb.iterations} seeks` : ''}${prep ? `, ${prep}` : ''})`)
   console.log(lines.join('\n'))
 }
 await browser.close()

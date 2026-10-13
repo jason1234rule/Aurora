@@ -8,7 +8,7 @@ import { renderStretch } from '@/utils/transitions/stretch/core'
 import { stretchPlan, renderPlan } from '@/utils/transitions/stretch/plan'
 import {
   buildSchedule, toTimeAt, fromTimeAt, fromPositionAt, timeAtPosition, positionAt, rampBackOf, pitchOf,
-  DEFAULT_RATE_RAMP, type TransitionTiming, type TransitionSchedule,
+  fromRampIn, equalPowerEvents, planValueAt, DEFAULT_RATE_RAMP, type TransitionTiming, type TransitionSchedule,
 } from '@/utils/transitions/schedule'
 import { buildTransitionGraph } from '@/utils/transitions/graph'
 import { clickTrack, peakNear } from './helpers'
@@ -123,6 +123,37 @@ describe('schedule with tempo matching', () => {
     expect(s.from.startPos).toBeCloseTo(100 - 3.92 - 2, 9)
     expect(fromPositionAt(100, s, 24)).toBeCloseTo(100 + 0.96 * 4, 9)
     for (const t of [14.5, 16, 17.3, 20, 23.9]) expect(fromTimeAt(100, s, fromPositionAt(100, s, t))).toBeCloseTo(t, 9)
+  })
+
+  it('FROM\'s ramp shortens near the start of the file so its buffer never starts before 0', () => {
+    const t = { ...base, rateFrom: 1.06, rampBack: 12 }
+    expect(fromRampIn(t)).toBe(12)
+    expect(fromRampIn({ ...t, exitAt: 9 })).toBeCloseTo((9 - 3) * 2 / 2.06, 9)
+    expect(fromRampIn({ ...t, exitAt: 2 })).toBe(0)
+    expect(fromRampIn({ ...t, rateFrom: 1 })).toBe(0)
+    expect(fromRampIn({ ...t, type: 'cut' })).toBe(0)
+    const s = buildSchedule({ ...t, exitAt: 9 }, { t0: 20, leadIn: 1 + fromRampIn({ ...t, exitAt: 9 }), fromWindowStart: 0, toWindowStart: 0 })
+    expect(s.from.startPos).toBeCloseTo(3 - 1, 9) // ramp starts 3 s in, the buffer 1 s before that
+  })
+
+  it('equal-power swap events keep the summed power of uncorrelated sides at 1', () => {
+    const up = { initial: 0, events: equalPowerEvents(10, 0.04, true) }
+    const down = { initial: 1, events: equalPowerEvents(10, 0.04, false) }
+    expect(planValueAt(up, 10)).toBe(0)
+    expect(planValueAt(down, 10)).toBe(1)
+    expect(planValueAt(up, 10.04)).toBeCloseTo(1, 12)
+    expect(planValueAt(down, 10.04)).toBeCloseTo(0, 12)
+    for (let x = 10; x <= 10.04; x += 0.0025) {
+      expect(planValueAt(up, x) ** 2 + planValueAt(down, x) ** 2).toBeGreaterThan(0.98)
+      expect(planValueAt(up, x) ** 2 + planValueAt(down, x) ** 2).toBeLessThan(1.02)
+    }
+  })
+
+  it('a stretched FROM is swapped in from the element with equal power, a resampled one linearly', () => {
+    const t = { ...base, pitch: 'keep' as const, rateFrom: 1.04, rampBack: 4 }
+    const opts = { t0: 20, leadIn: 5, fromWindowStart: 0, toWindowStart: 0, swapIn: 0.04 }
+    expect(buildSchedule(t, { ...opts, prerendered: { from: true } }).elementGain.length).toBe(9)
+    expect(buildSchedule(t, opts).elementGain.length).toBe(2)
   })
 
   it('positions before a ramp integrate backwards correctly', () => {

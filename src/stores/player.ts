@@ -3,7 +3,7 @@ import { ref, computed, watch } from 'vue'
 import { pluginBus } from '@/plugins/eventBus'
 import { useTransitionsStore } from './transitions'
 import {
-  TransitionEngine, PREP_WINDOW, MEASURE_LEAD, leadInFor,
+  TransitionEngine, MEASURE_LEAD, leadInFor, prepWindowFor,
   type PrepareResult, type PreviewHandle, type PreviewOptions,
 } from '@/utils/transitions/engine'
 import type { TransitionTiming } from '@/utils/transitions/schedule'
@@ -488,7 +488,8 @@ export const usePlayerStore = defineStore('player', () => {
   // ── Audio event listeners ────────────────────────────────────────────────
   audio.addEventListener('timeupdate', () => {
     if (txEngine?.ownsElement) return
-    currentTime.value = audio.currentTime
+    // FROM's buffer may be changing speed while the muted element doesn't: show what's heard
+    currentTime.value = txEngine?.active ? txEngine.fromPosition() : audio.currentTime
     // Scrobble after listening to 50% or 4 minutes, whichever is first
     if (scrobblingEnabled && !scrobbleReported && currentTrack.value && duration.value > 30) {
       const threshold = Math.min(duration.value * 0.5, 240)
@@ -1236,7 +1237,7 @@ export const usePlayerStore = defineStore('player', () => {
       if (eng.phase === 'ready') eng.release()
       return
     }
-    if (eng.phase === 'idle' && untilExit <= PREP_WINDOW) {
+    if (eng.phase === 'idle' && untilExit <= prepWindowFor(t)) {
       eng.prepare(t, from, to).then(r => handlePrepareResult(t, from, to, r))
     } else if (eng.phase === 'ready' && untilExit <= lead + MEASURE_LEAD) {
       eng.arm().catch(err => {

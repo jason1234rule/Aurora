@@ -7,6 +7,7 @@
  *
  *   node tests/browser/player-flow.mjs            # all scenarios
  *   node tests/browser/player-flow.mjs pause-post # one
+ *   TX_VARIANT=keep|meet node tests/browser/player-flow.mjs   # with time-stretching
  *
  * Needs Playwright with Chromium (PLAYWRIGHT_MODULE=<path to playwright> if not resolvable).
  */
@@ -66,6 +67,13 @@ const transition = {
   from: { key: 'norm:test artist||night drive', path: '/music/a.wav', duration: 90, title: 'Night Drive', artist: 'Test Artist' },
   to: { key: 'norm:other artist||morning run', path: '/music/b.wav', duration: 90, title: 'Morning Run', artist: 'Other Artist' },
 }
+// TX_VARIANT=keep: pitch-preserving stretch of TO; TX_VARIANT=meet: both songs stretched halfway
+const variant = process.env.TX_VARIANT
+if (variant === 'keep') Object.assign(transition, { pitch: 'keep', rampBack: 3 })
+if (variant === 'meet') {
+  const shared = Math.sqrt(124 * 127)
+  Object.assign(transition, { pitch: 'keep', stretch: 'meet', rateFrom: shared / 124, rateTo: shared / 127, rampBack: 3 })
+}
 
 const types = { '.html': 'text/html', '.js': 'application/javascript', '.css': 'text/css', '.wav': 'audio/wav' }
 const server = http.createServer((req, res) => {
@@ -100,6 +108,7 @@ const SCENARIOS = {
       h.expect(!!settled, 'handback settles'),
       h.expect(after.playing && after.t > settled?.t, 'TO keeps playing on the element'),
       h.expect((await h.debug()).handback?.converged, 'handback converged'),
+      ...(variant ? [h.expect((await h.debug()).stretch?.to === true, 'TO was time-stretched in the worker')] : []),
     ]
   },
   async 'pause-pre'(h) {
@@ -144,7 +153,8 @@ const SCENARIOS = {
     await h.until(s => s.phase === 'running' && s.t >= EXIT + 1.2, 20000)
     await h.call('next')
     const next = await h.snap()
-    const settled = await h.until(s => s.phase === 'idle', 10000)
+    // A time-stretched TO can't change course, so it eases back to its own tempo before the handback
+    const settled = await h.until(s => s.phase === 'idle', 20000)
     return [
       h.expect(next.track === 'Morning Run' && next.t > 5, '"next" mid-overlap jumps to TO where it is'),
       h.expect(!!settled && settled.playing && settled.t > next.t, 'and hands back without restarting it'),

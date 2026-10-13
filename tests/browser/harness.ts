@@ -5,7 +5,7 @@
  * FROM's clicks are on the left channel, TO's on the right.
  */
 import { TransitionEngine, leadInFor, MEASURE_LEAD } from '../../src/utils/transitions/engine'
-import { toTimeAt } from '../../src/utils/transitions/schedule'
+import { toTimeAt, fromTimeAt } from '../../src/utils/transitions/schedule'
 
 const RECORDER = `
 class Rec extends AudioWorkletProcessor {
@@ -67,19 +67,27 @@ async function main() {
   })
 
   const exitAt = beats.fromBeats[48]
+  // stretch=meet: both songs move halfway to a shared tempo (FROM eases in over rampBack before the exit)
+  const meet = params.get('stretch') === 'meet'
+  const shared = meet ? Math.sqrt(120 * beats.toBpm) : 120
   const t: any = {
     id: 't1', type: params.get('type') || 'blend', exitAt, entryAt: beats.toBeats[8],
     overlap: Number(params.get('overlap') || 8), fadeOut: 'linear', fadeIn: 'linear',
-    rateTo: 120 / beats.toBpm, needsReview: false, createdAt: 0, updatedAt: 0,
+    rateTo: shared / beats.toBpm, ...(meet ? { rateFrom: shared / 120 } : {}),
+    ...(params.get('pitch') ? { pitch: params.get('pitch') } : {}),
+    ...(params.get('rampBack') ? { rampBack: Number(params.get('rampBack')) } : {}),
+    needsReview: false, createdAt: 0, updatedAt: 0,
     from: { key: 'a', path: '/from.wav', duration: 40, title: 'from', artist: 'x' },
     to: { key: 'b', path: '/to.wav', duration: 40, title: 'to', artist: 'y' },
   }
   audio.src = '/from.wav'
   await new Promise(r => audio.addEventListener('canplay', r, { once: true }))
-  audio.currentTime = exitAt - 7
+  audio.currentTime = exitAt - (leadInFor(t) + MEASURE_LEAD + 3)
   await new Promise(r => audio.addEventListener('seeked', r, { once: true }))
   await audio.play()
+  const prepStarted = performance.now()
   log.push('prepare ' + JSON.stringify(await engine.prepare(t, { id: 'f', path: '/from.wav' } as any, { id: 't', path: '/to.wav' } as any)))
+  log.push(`prepare took ${(performance.now() - prepStarted).toFixed(0)} ms`)
 
   // What the player's timeupdate tick does
   while (exitAt - audio.currentTime > leadInFor(t) + MEASURE_LEAD) await sleep(50)
@@ -89,6 +97,8 @@ async function main() {
   if (scenario === 'collapse') {
     await sleep((schedule.t0 + 2 - ctx.currentTime) * 1000)
     collapseAt = ctx.currentTime + 0.05
+    // A FROM that has started changing speed is re-seeked on the element: not on the old grid
+    ;(window as any).__diverged = collapseAt > schedule.fromRampStart || !!t.rateFrom
     log.push('collapse ' + engine.collapseToFrom())
     await sleep(4000)
   } else if (scenario === 'next-mid') {
@@ -103,7 +113,9 @@ async function main() {
   const chunks: Float32Array[] = await new Promise(r => { rec.port.onmessage = (e) => r(e.data); rec.port.postMessage('stop') })
   ;(window as any).__result = {
     log, type: t.type, debug: engine.debug, sampleRate: ctx.sampleRate, settleCtx, collapseAt, exitAt,
+    diverged: !!(window as any).__diverged,
     schedule: { t0: schedule.t0, overlapEnd: schedule.overlapEnd, fromStartAt: schedule.from.startAt },
+    fromBeatTimes: beats.fromBeats.map((b: number) => fromTimeAt(exitAt, schedule, b)),
     // Final rate envelope (finishNow rewrites it), so TO beats map to their true ctx times
     toBeatTimes: beats.toBeats.map((b: number) => toTimeAt(schedule, b)),
     // One contiguous Float32 buffer (frame, L…, R… per block), base64 to keep the transfer small
