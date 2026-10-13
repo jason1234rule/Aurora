@@ -92,6 +92,13 @@ interface ArtistInfo {
   spotifyId?: string
 }
 
+/** An album's full official tracklist (Apple's public catalog), for showing songs that aren't downloaded */
+interface AlbumTracklist {
+  /** The catalog's name for the album */
+  name: string
+  tracks: { title: string; disc: number; track: number; duration: number }[]
+}
+
 /** Spotify stream counts scraped from kworb.net */
 interface ArtistStreams {
   spotifyId: string
@@ -230,6 +237,7 @@ interface Window {
     getArtistInfo: (artistName: string, forceRefresh?: boolean) => Promise<ArtistInfo | null>
     getArtistReleases: (artistName: string, forceRefresh?: boolean) => Promise<ArtistRelease[]>
     getArtistStreams: (artistName: string, forceRefresh?: boolean) => Promise<ArtistStreams | null>
+    getAlbumTracklist: (album: string, artist: string, localTitles: string[]) => Promise<AlbumTracklist | null>
     // Folder structure
     getFolderTree: (folderPath: string) => Promise<FolderEntry[]>
     // Scrobbling

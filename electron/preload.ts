@@ -108,6 +108,7 @@ contextBridge.exposeInMainWorld('api', {
   getArtistInfo: (artistName: string, forceRefresh = false) => ipcRenderer.invoke('artist:get-info', artistName, forceRefresh),
   getArtistReleases: (artistName: string, forceRefresh = false) => ipcRenderer.invoke('artist:get-releases', artistName, forceRefresh),
   getArtistStreams: (artistName: string, forceRefresh = false) => ipcRenderer.invoke('artist:get-streams', artistName, forceRefresh),
+  getAlbumTracklist: (album: string, artist: string, localTitles: string[]) => ipcRenderer.invoke('album:get-tracklist', album, artist, localTitles),
 
   // Folder tree
   getFolderTree: (folderPath: string) => ipcRenderer.invoke('folder:get-tree', folderPath),

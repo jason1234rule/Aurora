@@ -355,6 +355,34 @@ interface ArtistStreams {
   songs: { title: string; streams: number; daily: number; feature: boolean }[]
 }
 
+// ── Official album tracklists (Apple's public iTunes catalog) ──────────────
+// Lets the album page show songs that aren't downloaded. Tracklists rarely
+// change, so hits are kept for 30 days; misses are retried after 3.
+interface CatalogTrack { title: string; disc: number; track: number; duration: number }
+interface AlbumTracklist { name: string; tracks: CatalogTrack[] }
+
+const tracklistCachePath = join(cachePath, 'album-tracklist-cache.json')
+const TRACKLIST_TTL = 30 * 24 * 60 * 60 * 1000
+const TRACKLIST_MISS_TTL = 3 * 24 * 60 * 60 * 1000
+let tracklistCache: Record<string, { data: AlbumTracklist | null; ts: number }> | null = null
+
+async function getTracklistCache() {
+  if (!tracklistCache) {
+    try {
+      tracklistCache = existsSync(tracklistCachePath) ? JSON.parse(await readFile(tracklistCachePath, 'utf-8')) : {}
+    } catch { tracklistCache = {} }
+  }
+  return tracklistCache!
+}
+
+/** "30 For 30 (with Kendrick Lamar)" and "30 for 30" compare equal */
+function normTitle(s: string): string {
+  return s.toLowerCase()
+    .replace(/[([](feat\.?|ft\.?|featuring|with)\s[^)\]]*[)\]]/g, '')
+    .replace(/\s+-\s+(single|ep)$/, '')
+    .replace(/[^\p{L}\p{N}]+/gu, '')
+}
+
 const streamsCachePath = join(cachePath, 'artist-streams-cache.json')
 const ARTIST_STREAMS_TTL = 3 * 24 * 60 * 60 * 1000 // 3 days
 let artistStreamsCache: Record<string, { data: ArtistStreams | null; ts: number }> = {}
@@ -2714,6 +2742,56 @@ app.whenReady().then(async () => {
     } catch (err) {
       logger.error('Artist info fetch error:', err)
       return null
+    }
+  })
+
+  // ── IPC: Album tracklist (full official tracklist, to show missing songs) ──
+  // `localTitles` picks the right edition: the catalog album whose tracklist
+  // contains the most of the songs the user has wins.
+  ipcMain.handle('album:get-tracklist', async (_, album: string, artist: string, localTitles: string[] = []) => {
+    const cache = await getTracklistCache()
+    const key = `${normTitle(album)}|${normTitle(artist)}`
+    const hit = cache[key]
+    if (hit && Date.now() - hit.ts < (hit.data ? TRACKLIST_TTL : TRACKLIST_MISS_TTL)) return hit.data
+
+    try {
+      const search = JSON.parse(await fetchJSON(`https://itunes.apple.com/search?${new URLSearchParams({
+        term: `${album} ${artist}`, entity: 'album', limit: '25', country: 'US',
+      })}`)).results || []
+      const wantArtist = normTitle(artist.split(/,| & /)[0])
+      const wantAlbum = normTitle(album)
+      const candidates = search
+        .filter((a: any) => normTitle(a.artistName || '').includes(wantArtist))
+        // Same name first, then closest track count to what's on disk
+        .sort((a: any, b: any) => Number(normTitle(b.collectionName) === wantAlbum) - Number(normTitle(a.collectionName) === wantAlbum))
+        .slice(0, 5)
+
+      const local = new Set(localTitles.map(normTitle))
+      let best: { data: AlbumTracklist; score: number; matched: number } | null = null
+      for (const c of candidates) {
+        const songs = JSON.parse(await fetchJSON(`https://itunes.apple.com/lookup?id=${c.collectionId}&entity=song&country=US`)).results || []
+        const tracks: CatalogTrack[] = songs
+          .filter((s: any) => s.wrapperType === 'track')
+          .map((s: any) => ({ title: s.trackName, disc: s.discNumber || 1, track: s.trackNumber || 0, duration: (s.trackTimeMillis || 0) / 1000 }))
+          .sort((a: CatalogTrack, b: CatalogTrack) => a.disc - b.disc || a.track - b.track)
+        const matched = tracks.filter(t => local.has(normTitle(t.title))).length
+        const sameName = normTitle(c.collectionName) === wantAlbum
+        // Songs on disk count most; then the edition with the same name (one title spelt
+        // differently mustn't hand "Scarlet" to "Scarlet 2 CLAUDE"); then fewer extra tracks
+        const score = matched * 10 + (sameName ? 25 : 0) - (tracks.length - matched)
+        if (!best || score > best.score) best = { data: { name: c.collectionName, tracks }, score, matched }
+        if (matched === local.size && sameName) break
+      }
+
+      // Only trust it if it really is this album: most of the local songs must be on it
+      const needed = Math.max(1, Math.ceil(local.size / 2))
+      const data = best && best.matched >= needed ? best.data : null
+      cache[key] = { data, ts: Date.now() }
+      writeFile(tracklistCachePath, JSON.stringify(cache)).catch(() => {})
+      return data
+    } catch (err) {
+      logger.error('Album tracklist fetch error:', err)
+      return hit?.data ?? null
     }
   })
 
