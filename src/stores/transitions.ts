@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { songKey } from '@/utils/smartPlaylistMatcher'
 import type { Transition } from '@/types/transition'
+import { DEFAULT_RAMP_BACK_SECONDS } from '@/utils/transitions/schedule'
 
 export function pairKey(fromKey: string, toKey: string): string {
   return `${fromKey}→${toKey}`
@@ -72,6 +73,10 @@ export const useTransitionsStore = defineStore('transitions', () => {
       overlap: 8,
       fadeOut: 'equal-power',
       fadeIn: 'equal-power',
+      // New transitions keep each song's key while matching tempo (older ones stay 'vinyl')
+      pitch: 'keep',
+      stretch: 'to',
+      rampBack: DEFAULT_RAMP_BACK_SECONDS,
       needsReview: false,
       createdAt: now,
       updatedAt: now,

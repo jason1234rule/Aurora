@@ -30,7 +30,7 @@ import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import type { BeatGrid, FadePoint } from '@/types/transition'
 import type { TransitionTiming } from '@/utils/transitions/schedule'
 import { effectiveOverlap, transitionFade, fadeKnots, presetVertices } from '@/utils/transitions/schedule'
-import { mixMapping, moveExit, slideTo, type MixMapping } from '@/utils/transitions/timeline'
+import { mixMapping, moveExit, slideTo, fromSpeed, type MixMapping } from '@/utils/transitions/timeline'
 import type { PeakPyramid } from '@/utils/transitions/peaks'
 import { beatTime, beatIndexAt, isDownbeat, nearestBeat } from '@/utils/transitions/beatgrid'
 
@@ -77,6 +77,9 @@ const mapping = computed<MixMapping | null>(() => {
   try { return mixMapping(props.timing) } catch { return null }
 })
 const overlap = computed(() => effectiveOverlap(props.timing))
+/** FROM's speed during the blend, and how much of FROM's file the blend covers */
+const rateF = computed(() => fromSpeed(props.timing))
+const span = computed(() => overlap.value * rateF.value)
 const usableFromGrid = computed(() => props.fromGrid && props.fromGrid.bpm > 0 && props.fromGrid.confidence >= GRID_MIN_CONFIDENCE ? props.fromGrid : null)
 const usableToGrid = computed(() => props.toGrid && props.toGrid.bpm > 0 && props.toGrid.confidence >= GRID_MIN_CONFIDENCE ? props.toGrid : null)
 
@@ -86,9 +89,9 @@ const tOf = (x: number) => viewStart.value + x * spp.value
 // ── View control ───────────────────────────────────────────────────────────
 function fit() {
   const t = props.timing
-  const span = Math.max(16, overlap.value + 16)
-  viewStart.value = t.exitAt - span * 0.35
-  viewEnd.value = viewStart.value + span
+  const width = Math.max(16, span.value + 16)
+  viewStart.value = t.exitAt - width * 0.35
+  viewEnd.value = viewStart.value + width
 }
 
 function zoom(factor: number, centerT?: number) {
@@ -144,7 +147,7 @@ function draw() {
   const m = mapping.value
   const ov = overlap.value
   const xExit = xOf(t.exitAt)
-  const xEnd = xOf(t.exitAt + ov)
+  const xEnd = xOf(t.exitAt + span.value)
 
   // Lanes
   ctx.fillStyle = ink(0.035)
@@ -186,7 +189,7 @@ function draw() {
       const a = tOf(x)
       if (a + step < 0 || a > props.fromDuration) continue
       const [lo, hi] = props.fromPeaks.range(a, a + step)
-      const heard = a < t.exitAt + ov
+      const heard = a < t.exitAt + span.value
       ctx.fillStyle = heard ? ink(0.55) : ink(0.18)
       const y0 = midF - hi * amp, y1 = midF - lo * amp
       ctx.fillRect(x, y0, 1, Math.max(1, y1 - y0))
@@ -267,7 +270,7 @@ function draw() {
 
   // Bass swap marker
   if (t.bassSwap && ov > 0) {
-    const xb = xOf(t.exitAt + t.bassSwap.at)
+    const xb = xOf(t.exitAt + t.bassSwap.at * rateF.value)
     const yb = TO_TOP - GAP / 2
     ctx.fillStyle = acc(1)
     ctx.beginPath()
@@ -327,7 +330,7 @@ const pointsOf = (fade: Fade): FadePoint[] =>
   (fade === 'out' ? props.timing.fadeOutPoints : props.timing.fadeInPoints) ?? []
 
 function knotXY(fade: Fade, k: FadePoint) {
-  const xExit = xOf(props.timing.exitAt), xEnd = xOf(props.timing.exitAt + overlap.value)
+  const xExit = xOf(props.timing.exitAt), xEnd = xOf(props.timing.exitAt + span.value)
   return { x: xExit + (xEnd - xExit) * k.x, y: laneTop(fade) + LANE - k.y * (LANE - 2) - 1 }
 }
 
@@ -380,10 +383,10 @@ function hitTest(x: number, y: number): Hit {
     }
   }
   if (t.bassSwap && ov > 0) {
-    const xb = xOf(t.exitAt + t.bassSwap.at)
+    const xb = xOf(t.exitAt + t.bassSwap.at * rateF.value)
     if (Math.abs(x - xb) <= HANDLE_PX + 2 && Math.abs(y - (TO_TOP - GAP / 2)) <= 12) return { target: 'bass' }
   }
-  if (ov > 0 && Math.abs(x - xOf(t.exitAt + ov)) <= HANDLE_PX) return { target: 'overlapEnd' }
+  if (ov > 0 && Math.abs(x - xOf(t.exitAt + span.value)) <= HANDLE_PX) return { target: 'overlapEnd' }
   if (Math.abs(x - xOf(t.exitAt)) <= HANDLE_PX) return { target: 'exit' }
   const curve = curveAt(x, y)
   if (curve) return { target: 'curve', fade: curve }
@@ -394,7 +397,7 @@ function hitTest(x: number, y: number): Hit {
 /** The fade whose curve passes within a few px of (x, y), if any */
 function curveAt(x: number, y: number): Fade | null {
   const ov = overlap.value
-  const xExit = xOf(props.timing.exitAt), xEnd = xOf(props.timing.exitAt + ov)
+  const xExit = xOf(props.timing.exitAt), xEnd = xOf(props.timing.exitAt + span.value)
   if (ov <= 0 || x <= xExit || x >= xEnd) return null
   const frac = (x - xExit) / (xEnd - xExit)
   for (const fade of ['out', 'in'] as const) {
@@ -413,7 +416,7 @@ function onDoubleClick(e: MouseEvent) {
   const hit = hitTest(x, y)
   if (hit.target !== 'curve' || !hit.fade) { fit(); return }
   const fade = hit.fade
-  const xExit = xOf(props.timing.exitAt), xEnd = xOf(props.timing.exitAt + overlap.value)
+  const xExit = xOf(props.timing.exitAt), xEnd = xOf(props.timing.exitAt + span.value)
   const point = { x: (x - xExit) / (xEnd - xExit), y: gainAtY(fade, y) }
   // Turning a preset into a custom fade starts from the preset's shape
   const base = isCustom(fade) ? pointsOf(fade) : presetVertices(fade === 'out' ? props.timing.fadeOut : props.timing.fadeIn, fade)
@@ -480,6 +483,9 @@ function onPointerMove(e: PointerEvent) {
   if (!drag.moved) return
   const t0 = drag.startTiming
   const ov = effectiveOverlap(t0)
+  // The blend measured along FROM's file (it differs from ov when FROM changes speed)
+  const rF = fromSpeed(t0)
+  const sp = ov * rF
 
   switch (drag.target) {
     case 'vertex': {
@@ -489,9 +495,9 @@ function onPointerMove(e: PointerEvent) {
       // Stay between the neighbouring vertices (or the fixed ends)
       const lo = (i > 0 ? pts[i - 1].x : 0) + 0.001
       const hi = (i < pts.length - 1 ? pts[i + 1].x : 1) - 0.001
-      let time = t0.exitAt + ((x - xOf(t0.exitAt)) / (xOf(t0.exitAt + ov) - xOf(t0.exitAt))) * ov
-      time = snapFrom(time, e)
-      pts[i] = { x: Math.max(lo, Math.min(hi, (time - t0.exitAt) / ov)), y: gainAtY(fade, y) }
+      let pos = t0.exitAt + ((x - xOf(t0.exitAt)) / (xOf(t0.exitAt + sp) - xOf(t0.exitAt))) * sp
+      pos = snapFrom(pos, e)
+      pts[i] = { x: Math.max(lo, Math.min(hi, (pos - t0.exitAt) / sp)), y: gainAtY(fade, y) }
       emitPoints(fade, pts)
       break
     }
@@ -503,22 +509,22 @@ function onPointerMove(e: PointerEvent) {
     }
     case 'exit': {
       let exit = snapFrom(t0.exitAt + dx * spp.value, e)
-      exit = Math.max(0, Math.min(exit, props.fromDuration - Math.max(ov, 0.05)))
+      exit = Math.max(0, Math.min(exit, props.fromDuration - Math.max(sp, 0.05)))
       const next = moveExit(t0, exit)
       if (next.entryAt < 0 || next.entryAt >= props.toDuration) break
       emit('update', next)
       break
     }
     case 'overlapEnd': {
-      const end = snapFrom(t0.exitAt + ov + dx * spp.value, e)
-      const overlapNew = Math.max(0.05, Math.min(end - t0.exitAt, props.fromDuration - t0.exitAt))
+      const end = snapFrom(t0.exitAt + sp + dx * spp.value, e)
+      const overlapNew = Math.max(0.05, Math.min(end - t0.exitAt, props.fromDuration - t0.exitAt) / rF)
       const patch: Partial<TransitionTiming> = { overlap: overlapNew }
       if (t0.bassSwap) patch.bassSwap = { at: Math.min(t0.bassSwap.at, overlapNew) }
       emit('update', patch)
       break
     }
     case 'bass': {
-      const at = snapFrom(t0.exitAt + (t0.bassSwap?.at ?? 0) + dx * spp.value, e) - t0.exitAt
+      const at = (snapFrom(t0.exitAt + (t0.bassSwap?.at ?? 0) * rF + dx * spp.value, e) - t0.exitAt) / rF
       emit('update', { bassSwap: { at: Math.max(0, Math.min(at, ov)) } })
       break
     }

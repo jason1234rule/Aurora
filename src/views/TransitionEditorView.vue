@@ -86,7 +86,7 @@
         >
           <svg v-if="!previewing" class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
           <svg v-else class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M6 6h12v12H6z" /></svg>
-          {{ previewing ? 'Stop' : 'Play transition' }}
+          {{ preparingPreview ? 'Preparing…' : previewing ? 'Stop' : 'Play transition' }}
         </button>
         <select v-model.number="preRoll" class="tx-select" title="How much of the first song to hear before the blend">
           <option :value="5">start 5 s before</option>
@@ -111,6 +111,11 @@
         <span v-if="analysing" class="text-xs text-white/30 flex items-center gap-2">
           <span class="w-3 h-3 border border-accent/30 border-t-accent rounded-full animate-spin" />
           Finding beats…
+        </span>
+        <span v-else-if="stretchState === 'pending'" class="text-xs text-white/30 flex items-center gap-2"
+          title="Keeping the pitch while the speed changes takes a moment to prepare">
+          <span class="w-3 h-3 border border-accent/30 border-t-accent rounded-full animate-spin" />
+          Preparing the speed change…
         </span>
         <label class="tx-chip" :class="snap ? 'tx-chip-on' : ''" title="Snap handles to beats (hold Alt while dragging to override)">
           <input type="checkbox" v-model="snap" class="hidden" /> Snap to beats
@@ -180,8 +185,8 @@
                   v-for="b in [4, 8, 16, 32]"
                   :key="b"
                   class="tx-chip"
-                  :class="Math.abs(draft.overlap / fromBeat - b) < 0.05 ? 'tx-chip-on' : ''"
-                  @click="update({ overlap: clampOverlap(b * fromBeat!) })"
+                  :class="Math.abs(draft.overlap / fromBeatHeard! - b) < 0.05 ? 'tx-chip-on' : ''"
+                  @click="update({ overlap: clampOverlap(b * fromBeatHeard!) })"
                 >{{ b }} beats</button>
               </template>
               <template v-else>
@@ -249,7 +254,7 @@
           <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
         </svg>
         Advanced
-        <span class="text-xs text-white/30">exact timing, tempo, bass swap, filter</span>
+        <span class="text-xs text-white/30">exact timing, tempo &amp; pitch, bass swap, filter</span>
       </button>
 
       <div v-if="advancedOpen" class="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-3">
@@ -283,8 +288,7 @@
         <section class="tx-card" :class="draft.type === 'cut' ? 'opacity-40 pointer-events-none' : ''">
           <h2 class="tx-card-title">Tempo</h2>
           <p class="tx-help mb-3">
-            Songs at different speeds drift apart during a blend. Speeding the incoming song up or down slightly keeps the beats together
-            (it also shifts the pitch a little).
+            Songs at different speeds drift apart during a blend. Changing the speed slightly keeps the beats together.
           </p>
           <div class="tx-row">
             <span class="tx-label">Speeds</span>
@@ -292,19 +296,62 @@
               {{ fromGrid?.bpm ? fromGrid.bpm.toFixed(1) : '—' }} → {{ toGrid?.bpm ? toGrid.bpm.toFixed(1) : '—' }} BPM
             </span>
           </div>
+
+          <div class="tx-row">
+            <span class="tx-label">Who adjusts</span>
+            <select class="tx-select flex-1 min-w-0" :value="stretchMode" @change="setStretchMode(($event.target as HTMLSelectElement).value as StretchMode)">
+              <option value="to">{{ toName }} matches</option>
+              <option value="meet">Meet in the middle</option>
+              <option value="from">{{ fromName }} matches</option>
+            </select>
+          </div>
+          <p class="tx-help tx-indent">{{ stretchModeHelp }}</p>
+
           <div class="tx-row">
             <span class="tx-label">Adjust</span>
-            <input type="range" :min="-MAX_RATE_DEVIATION * 100" :max="MAX_RATE_DEVIATION * 100" step="0.01" class="flex-1 accent-accent"
+            <input type="range" :min="-MAX_RATE_DEVIATION * 100" :max="MAX_RATE_DEVIATION * 100" step="0.01" class="flex-1 min-w-0 accent-accent"
               :value="ratePercent" @input="setRatePercent(+($event.target as HTMLInputElement).value)" />
             <span class="text-xs text-white/60 tabular-nums w-14 text-right">{{ ratePercent >= 0 ? '+' : '' }}{{ ratePercent.toFixed(2) }}%</span>
           </div>
           <div class="flex items-center gap-2 ml-[88px] mb-1">
             <button class="tx-chip" :disabled="!canMatchTempo" @click="matchTempo">Match tempo</button>
-            <button class="tx-chip" @click="update({ rateTo: undefined })">Reset</button>
+            <button class="tx-chip" @click="setRates({ rateTo: undefined, rateFrom: undefined })">Reset</button>
           </div>
+          <p class="tx-help mt-2 mb-3">{{ tempoSummary }}</p>
+
+          <div class="tx-row">
+            <span class="tx-label">Pitch</span>
+            <div class="flex rounded-lg overflow-hidden border border-white/[0.08]">
+              <button
+                v-for="opt in pitchOptions"
+                :key="opt.value"
+                @click="update({ pitch: opt.value })"
+                class="px-3 py-1.5 text-xs transition-colors"
+                :class="pitchMode === opt.value ? 'bg-white/[0.12] text-white' : 'text-white/40 hover:text-white/70'"
+              >{{ opt.label }}</button>
+            </div>
+          </div>
+          <p class="tx-help tx-indent">{{ pitchHelp }}</p>
+
+          <div class="tx-row">
+            <span class="tx-label">Ease back</span>
+            <div class="flex flex-wrap gap-1">
+              <button
+                v-for="opt in rampBackOptions"
+                :key="opt.label"
+                class="tx-chip"
+                :class="Math.abs(rampBackSeconds - opt.seconds) < 0.05 ? 'tx-chip-on' : ''"
+                @click="update({ rampBack: opt.seconds })"
+              >{{ opt.label }}</button>
+            </div>
+          </div>
+          <p class="tx-help tx-indent">{{ rampBackHelp }}</p>
+
           <p v-if="tempoTooFar" class="text-[11px] text-amber-300/70 mt-2">
-            These tempos are more than 3% apart, too far to match. A short blend, a quick cut or an echo out will sound cleaner.
+            These tempos are more than {{ MAX_RATE_DEVIATION * 100 }}% apart, too far to match. A short blend, a quick cut or an echo out will
+            sound cleaner.
           </p>
+          <p v-else-if="stretchWarn" class="text-[11px] text-amber-300/70 mt-2">{{ stretchWarnText }}</p>
         </section>
 
         <section class="tx-card" :class="draft.type === 'cut' ? 'opacity-40 pointer-events-none' : ''">
@@ -394,13 +441,18 @@ import { useTransitionsStore } from '@/stores/transitions'
 import { useToast } from '@/composables/useToast'
 import { songKey } from '@/utils/smartPlaylistMatcher'
 import { formatTime } from '@/utils/formatTime'
-import { decodeWindow, type PreviewHandle, type PreviewSolo } from '@/utils/transitions/engine'
+import { decodeWindow, previewStretchPlan, type PreviewHandle, type PreviewSolo } from '@/utils/transitions/engine'
+import { renderPlan, planKey, type StretchPlan } from '@/utils/transitions/stretch/plan'
+import { stretchInWorker } from '@/utils/transitions/stretch/client'
 import { PeakPyramid } from '@/utils/transitions/peaks'
 import { getBeatGrid } from '@/utils/transitions/analysis'
 import { suggestTransition } from '@/utils/transitions/suggest'
-import { moveExit, slideTo } from '@/utils/transitions/timeline'
-import { clampRate, presetVertices, MAX_RATE_DEVIATION, DEFAULT_ECHO, type TransitionTiming } from '@/utils/transitions/schedule'
-import type { Transition, TransitionEndpoint, BeatGrid, CurvePreset, TransitionType } from '@/types/transition'
+import { moveExit, slideTo, fromSpeed } from '@/utils/transitions/timeline'
+import {
+  clampRate, presetVertices, rateRatio, splitRates, pitchOf, rampBackOf, fromPositionAt,
+  MAX_RATE_DEVIATION, STRETCH_WARN_DEVIATION, DEFAULT_RAMP_BACK_BARS, MAX_FROM_RAMP, DEFAULT_ECHO, type TransitionTiming,
+} from '@/utils/transitions/schedule'
+import type { Transition, TransitionEndpoint, BeatGrid, CurvePreset, TransitionType, PitchMode, StretchMode } from '@/types/transition'
 import TransitionTimeline from '@/components/transitions/TransitionTimeline.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 
@@ -440,6 +492,7 @@ const toDuration = computed(() => toBuf.value?.duration ?? 0)
 
 const TIMING_KEYS = [
   'type', 'exitAt', 'entryAt', 'overlap', 'fadeOut', 'fadeIn', 'fadeOutPoints', 'fadeInPoints', 'bassSwap', 'filter', 'echo', 'rateTo',
+  'rateFrom', 'pitch', 'stretch', 'rampBack',
 ] as const
 
 function timingOf(t: Transition): TransitionTiming {
@@ -495,8 +548,16 @@ const toBeat = computed(() => usable(toGrid.value)?.period ?? null)
 /** Leave / enter points move by whole bars when the beats are known, else by 2 s */
 const barLabel = computed(() => (fromBeat.value ? '1 bar' : '2 s'))
 const barTitle = computed(() => (fromBeat.value ? 'Move by one bar (4 beats), which keeps the beats lined up' : 'Move by 2 seconds'))
-const rate = computed(() => (draft.value?.type === 'cut' ? 1 : clampRate(draft.value?.rateTo)))
-const ratePercent = computed(() => (rate.value - 1) * 100)
+/** How much faster the incoming song plays than the outgoing one during the blend */
+const ratio = computed(() => (!draft.value || draft.value.type === 'cut' ? 1 : rateRatio(draft.value)))
+const ratePercent = computed(() => (ratio.value - 1) * 100)
+const toRate = computed(() => (draft.value?.type === 'cut' ? 1 : clampRate(draft.value?.rateTo)))
+const fromRate = computed(() => (draft.value?.type === 'cut' ? 1 : clampRate(draft.value?.rateFrom)))
+/** One beat of the outgoing song as heard during the blend (shorter when it speeds up) */
+const fromBeatHeard = computed(() => (fromBeat.value ? fromBeat.value / fromRate.value : null))
+const stretchMode = computed<StretchMode>(() => draft.value?.stretch ?? 'to')
+const pitchMode = computed<PitchMode>(() => (draft.value ? pitchOf(draft.value) : 'keep'))
+const rampBackSeconds = computed(() => (draft.value ? rampBackOf(draft.value) : 0))
 const tempoRatio = computed(() => {
   const f = usable(fromGrid.value), t = usable(toGrid.value)
   return f && t ? f.bpm / t.bpm : null
@@ -505,11 +566,58 @@ const canMatchTempo = computed(() => tempoRatio.value !== null && Math.abs(tempo
 const tempoTooFar = computed(() => tempoRatio.value !== null && Math.abs(tempoRatio.value - 1) > MAX_RATE_DEVIATION)
 const echo = computed(() => draft.value?.echo ?? { ...DEFAULT_ECHO })
 const echoBeats = computed(() => {
-  if (!fromBeat.value) return 0.75
-  const beats = echo.value.delay / fromBeat.value
+  if (!fromBeatHeard.value) return 0.75
+  const beats = echo.value.delay / fromBeatHeard.value
   return echoBeatOptions.reduce((best, o) => (Math.abs(o.value - beats) < Math.abs(best - beats) ? o.value : best), 0.75)
 })
 const filterKey = computed(() => (draft.value?.filter ? `${draft.value.filter.target}-${draft.value.filter.kind}` : 'none'))
+
+// ── Tempo wording ──────────────────────────────────────────────────────────
+const pitchOptions: { value: PitchMode; label: string }[] = [
+  { value: 'keep', label: 'Keep pitch' },
+  { value: 'vinyl', label: 'Vinyl' },
+]
+const pct = (r: number) => `${Math.abs((r - 1) * 100).toFixed(1)}%`
+const changes = (name: string, r: number) => `${name} ${r > 1 ? 'speeds up' : 'slows down'} ${pct(r)}`
+
+const stretchModeHelp = computed(() => {
+  switch (stretchMode.value) {
+    case 'meet': return `Both songs change speed by about half as much: ${fromName.value} eases into the shared tempo before the blend, ${toName.value} eases back to its own afterwards.`
+    case 'from': return `${fromName.value} eases into ${toName.value}'s tempo before the blend. ${toName.value} plays at its own speed.`
+    default: return `${toName.value} changes speed to match ${fromName.value}, then eases back to its own speed.`
+  }
+})
+const tempoSummary = computed(() => {
+  const parts: string[] = []
+  if (Math.abs(fromRate.value - 1) > 1e-4) parts.push(changes(fromName.value, fromRate.value))
+  if (Math.abs(toRate.value - 1) > 1e-4) parts.push(changes(toName.value, toRate.value))
+  return parts.length ? `During the blend, ${parts.join(' and ')}.` : 'Both songs play at their own speed.'
+})
+const pitchHelp = computed(() => pitchMode.value === 'keep'
+  ? 'Each song stays in its own key while its speed changes (time-stretching). Takes a moment to prepare.'
+  : 'Like nudging a record: the pitch rises and falls with the speed. The cleanest sound, but the key shifts slightly.')
+const rampBackOptions = computed(() => {
+  const bar = toBeat.value ? toBeat.value * 4 : null
+  return bar
+    ? [2, 4, 8, 16].map(b => ({ label: `${b} bars`, seconds: b * bar }))
+    : [2, 4, 8, 16].map(sec => ({ label: `${sec} s`, seconds: sec }))
+})
+const rampBackHelp = computed(() => {
+  const secs = `${rampBackSeconds.value.toFixed(1)} s`
+  const into = Math.abs(fromRate.value - 1) > 1e-4
+    ? ` ${fromName.value} takes the same time to ease into the new speed before the blend (at most ${MAX_FROM_RAMP} s).`
+    : ''
+  return `How gently ${toName.value} returns to its own speed after the blend (${secs}). Longer is smoother.${into}`
+})
+/** The bigger of the two speed changes */
+const biggestChange = computed(() => Math.max(Math.abs(toRate.value - 1), Math.abs(fromRate.value - 1)))
+const stretchWarn = computed(() => biggestChange.value > STRETCH_WARN_DEVIATION + 1e-9)
+const stretchWarnText = computed(() => {
+  const big = `That's a big speed change (${(biggestChange.value * 100).toFixed(1)}%).`
+  if (pitchMode.value === 'vinyl') return `${big} With Vinyl the key moves by about a semitone or more, which can clash. Keep pitch avoids that.`
+  if (stretchMode.value !== 'meet') return `${big} Stretching this far can sound a little smeared. Meet in the middle halves it.`
+  return `${big} Stretching this far can sound a little smeared on some songs. Have a listen.`
+})
 
 const round = (v: number, digits: number) => Math.round(v * 10 ** digits) / 10 ** digits
 
@@ -525,6 +633,9 @@ function isLocal(t: Track) {
 async function load() {
   const token = ++loadToken
   stopPreview()
+  // Stretched previews belong to the songs that were open
+  stretchCache.clear()
+  stretchDone.clear()
   status.value = 'loading'
   fromGrid.value = toGrid.value = null
   fromBuf.value = toBuf.value = fromPeaks.value = toPeaks.value = null
@@ -593,7 +704,11 @@ async function load() {
   fromGrid.value = fg
   toGrid.value = tg
   analysing.value = false
-  if (!existing.value && !touched) applySuggestion(false)
+  if (!existing.value && !touched) {
+    applySuggestion(false)
+    // New transitions ease back over 8 bars of the incoming song when its beats are known
+    if (toBeat.value && draft.value) draft.value.rampBack = DEFAULT_RAMP_BACK_BARS * 4 * toBeat.value
+  }
 }
 
 watch(() => route.fullPath, () => {
@@ -620,7 +735,7 @@ function update(patch: Partial<Transition>) {
 
 function clampOverlap(v: number) {
   const d = draft.value!
-  return Math.max(0.05, Math.min(isFinite(v) ? v : 8, fromDuration.value - d.exitAt))
+  return Math.max(0.05, Math.min(isFinite(v) ? v : 8, (fromDuration.value - d.exitAt) / fromRate.value))
 }
 
 function clampEntry(v: number) {
@@ -703,25 +818,49 @@ function nudge(seconds: number) {
   update({ entryAt: clampEntry(slideTo(timingOf(d), seconds)) })
 }
 
+/**
+ * Change the songs' speeds. Lengths set in the outgoing song's beats (blend, bass swap, echo)
+ * are kept in its beats, so a 16-beat blend stays 16 beats when that song changes speed.
+ */
+function setRates(rates: Pick<Transition, 'rateTo' | 'rateFrom'>, extra: Partial<Transition> = {}) {
+  const d = draft.value
+  if (!d) return
+  const k = fromSpeed(timingOf(d)) / (d.type === 'cut' ? 1 : clampRate(rates.rateFrom))
+  const patch: Partial<Transition> = { ...extra, ...rates }
+  if (Math.abs(k - 1) > 1e-9) {
+    patch.overlap = clampOverlapFor(d.overlap * k, clampRate(rates.rateFrom))
+    if (d.bassSwap) patch.bassSwap = { at: Math.min(d.bassSwap.at * k, patch.overlap) }
+    if (d.echo) patch.echo = { ...d.echo, delay: d.echo.delay * k }
+  }
+  update(patch)
+}
+
+function clampOverlapFor(v: number, rateFrom: number) {
+  return Math.max(0.05, Math.min(v, (fromDuration.value - draft.value!.exitAt) / rateFrom))
+}
+
 function setRatePercent(pct: number) {
-  const r = 1 + pct / 100
-  update({ rateTo: Math.abs(r - 1) < 1e-5 ? undefined : r })
+  setRates(splitRates(1 + pct / 100, stretchMode.value))
 }
 
 function matchTempo() {
-  if (tempoRatio.value !== null) update({ rateTo: clampRate(tempoRatio.value) })
+  if (tempoRatio.value !== null) setRates(splitRates(tempoRatio.value, stretchMode.value))
+}
+
+function setStretchMode(mode: StretchMode) {
+  setRates(splitRates(ratio.value, mode), { stretch: mode })
 }
 
 function toggleBassSwap() {
   const d = draft.value!
   if (d.bassSwap) { update({ bassSwap: undefined }); return }
   let at = d.overlap / 2
-  if (fromBeat.value) at = Math.round(at / fromBeat.value) * fromBeat.value
+  if (fromBeatHeard.value) at = Math.round(at / fromBeatHeard.value) * fromBeatHeard.value
   update({ bassSwap: { at: Math.min(at, d.overlap) } })
 }
 
 function setEchoBeats(beats: number) {
-  if (fromBeat.value) update({ echo: { ...echo.value, delay: beats * fromBeat.value } })
+  if (fromBeatHeard.value) update({ echo: { ...echo.value, delay: beats * fromBeatHeard.value } })
 }
 
 const FILTER_DEFAULTS: Record<string, { startHz: number; endHz: number }> = {
@@ -749,8 +888,19 @@ function applySuggestion(userAsked: boolean) {
     to: { grid: toGrid.value, duration: toDuration.value },
   })
   const keep = { type: draft.value.type, fadeOut: draft.value.fadeOut, fadeIn: draft.value.fadeIn }
-  for (const k of ['bassSwap', 'rateTo'] as const) delete draft.value[k]
+  const mode = stretchMode.value
+  for (const k of ['bassSwap', 'rateTo', 'rateFrom'] as const) delete draft.value[k]
   Object.assign(draft.value, s)
+  // The suggestion matches by changing the incoming song; share that out as the user prefers.
+  // Its lengths are in the outgoing song's beats, which last 1/rateFrom as long once it changes speed.
+  const rates = splitRates(s.rateTo ?? 1, mode)
+  if (rates.rateTo === undefined) delete draft.value.rateTo
+  else draft.value.rateTo = rates.rateTo
+  if (rates.rateFrom !== undefined) {
+    draft.value.rateFrom = rates.rateFrom
+    draft.value.overlap = clampOverlapFor(draft.value.overlap / rates.rateFrom, rates.rateFrom)
+    if (draft.value.bassSwap) draft.value.bassSwap = { at: Math.min(draft.value.bassSwap.at / rates.rateFrom, draft.value.overlap) }
+  }
   // Re-suggesting is about timing: keep the style and any fades the user shaped
   if (userAsked) Object.assign(draft.value, keep)
   if (userAsked) touched = true
@@ -806,22 +956,92 @@ function audition() {
 
 // ── Preview ────────────────────────────────────────────────────────────────
 const preview = shallowRef<PreviewHandle | null>(null)
-const previewing = computed(() => !!preview.value)
+/** Waiting for the time-stretched audio before the preview can start */
+const preparingPreview = ref(false)
+const previewing = computed(() => !!preview.value || preparingPreview.value)
 const playhead = ref<number | null>(null)
 const preRoll = ref(10)
 const loop = ref(false)
 const solo = ref<PreviewSolo>('both')
+const POST_ROLL = 5
 let rafId = 0
+let previewToken = 0
 
-function startPreview() {
+// With "Keep pitch" the parts that change speed are time-stretched in a worker first. Renders
+// are cached by what they depend on, and started shortly after the settings stop changing so
+// pressing play is usually instant.
+type Stretched = { from?: AudioBuffer; to?: AudioBuffer }
+const stretchCache = new Map<string, Promise<Stretched>>()
+const stretchDone = new Set<string>()
+const stretchState = ref<'none' | 'pending' | 'ready'>('none')
+let stretchTimer: ReturnType<typeof setTimeout> | undefined
+
+function previewPlan(): StretchPlan {
+  return draft.value ? previewStretchPlan(timingOf(draft.value), { preRoll: preRoll.value, postRoll: POST_ROLL }) : {}
+}
+
+function stretchedFor(plan: StretchPlan): Promise<Stretched> | null {
+  if (!plan.from && !plan.to) return null
+  if (!fromBuf.value || !toBuf.value) return null
+  const key = planKey(plan)
+  let p = stretchCache.get(key)
+  if (!p) {
+    const ctx = player.getAudioContext() ?? (fallbackCtx ??= new AudioContext())
+    p = renderPlan(ctx, plan, { from: { buffer: fromBuf.value, start: 0 }, to: { buffer: toBuf.value, start: 0 } }, stretchInWorker)
+    stretchCache.set(key, p)
+    p.then(() => {
+      stretchDone.add(key)
+      if (stretchKey.value === key) stretchState.value = 'ready'
+    }, () => { stretchCache.delete(key) })
+    // Keep only the last few renders (each holds tens of seconds of audio)
+    while (stretchCache.size > 4) {
+      const oldest = stretchCache.keys().next().value!
+      stretchCache.delete(oldest)
+      stretchDone.delete(oldest)
+    }
+  }
+  return p
+}
+
+const stretchKey = computed(() => {
+  if (status.value !== 'ready' || !draft.value) return ''
+  const plan = previewPlan()
+  return plan.from || plan.to ? planKey(plan) : ''
+})
+
+watch(stretchKey, (key) => {
+  clearTimeout(stretchTimer)
+  if (!key) { stretchState.value = 'none'; return }
+  if (stretchDone.has(key)) { stretchState.value = 'ready'; return }
+  stretchState.value = 'pending'
+  stretchTimer = setTimeout(() => { stretchedFor(previewPlan())?.catch(() => {}) }, 400)
+})
+
+async function startPreview() {
   const d = draft.value
   if (!d || !fromBuf.value || !toBuf.value) return
   stopPreview()
+  const token = ++previewToken
+  const t = timingOf(d)
   const exitAt = d.exitAt
-  const handle = player.previewTransition({ from: fromBuf.value, to: toBuf.value }, timingOf(d), {
+  let stretched: Stretched | undefined
+  const pending = stretchedFor(previewPlan())
+  if (pending) {
+    preparingPreview.value = true
+    try {
+      stretched = await pending
+    } catch (err) {
+      console.warn('[Transitions] Time-stretch failed:', err)
+      toast.error('Couldn\'t prepare the pitch-kept speed change, so this preview changes pitch like vinyl.')
+    }
+    if (token !== previewToken) return
+    preparingPreview.value = false
+  }
+  const handle = player.previewTransition({ from: fromBuf.value, to: toBuf.value }, t, {
     preRoll: preRoll.value,
-    postRoll: 5,
+    postRoll: POST_ROLL,
     solo: solo.value,
+    stretched,
     onEnded: () => {
       if (preview.value !== handle) return
       preview.value = null
@@ -836,13 +1056,16 @@ function startPreview() {
     if (preview.value !== handle) return
     // Something else (e.g. pressing play in the player bar) stopped the preview
     if (!player.isTransitionPreviewing()) { preview.value = null; playhead.value = null; return }
-    playhead.value = exitAt + (ctx.currentTime - handle.t0)
+    // Where the outgoing song is (it may be changing speed): the timeline's x-axis
+    playhead.value = fromPositionAt(exitAt, handle.schedule, ctx.currentTime)
     rafId = requestAnimationFrame(tick)
   }
   rafId = requestAnimationFrame(tick)
 }
 
 function stopPreview() {
+  previewToken++
+  preparingPreview.value = false
   if (rafId) cancelAnimationFrame(rafId)
   rafId = 0
   preview.value?.stop()
@@ -877,6 +1100,8 @@ onMounted(() => document.addEventListener('keydown', onKeydown, { capture: true 
 onBeforeUnmount(() => {
   document.removeEventListener('keydown', onKeydown, { capture: true })
   stopPreview()
+  clearTimeout(stretchTimer)
+  stretchCache.clear()
   fallbackCtx?.close().catch(() => {})
 })
 

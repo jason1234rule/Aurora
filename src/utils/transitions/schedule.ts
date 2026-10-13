@@ -11,7 +11,7 @@
  * `t0` is the ctx time at which FROM's `exitAt` is heard; TO's `entryAt` is
  * heard at the same instant.
  */
-import type { CurvePreset, FadePoint, PitchMode, Transition } from '@/types/transition'
+import type { CurvePreset, FadePoint, PitchMode, StretchMode, Transition } from '@/types/transition'
 
 /** Largest speed change either song gets, as a fraction */
 export const MAX_RATE_DEVIATION = 0.10
@@ -110,6 +110,23 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
 export function clampRate(rate: number | undefined): number {
   if (rate === undefined || !isFinite(rate) || rate <= 0) return 1
   return clamp(rate, 1 - MAX_RATE_DEVIATION, 1 + MAX_RATE_DEVIATION)
+}
+
+/** How much faster TO plays than FROM during the overlap (1 = no tempo change) */
+export function rateRatio(t: Pick<Transition, 'rateTo' | 'rateFrom'>): number {
+  return clampRate(t.rateTo) / clampRate(t.rateFrom)
+}
+
+/**
+ * Split a tempo match (TO's speed relative to FROM's, as rateRatio) between the songs:
+ * 'to' changes only TO, 'from' only FROM, 'meet' moves both halfway (geometrically).
+ */
+export function splitRates(ratio: number, mode: StretchMode): Pick<Transition, 'rateTo' | 'rateFrom'> {
+  const r = clampRate(ratio)
+  if (Math.abs(r - 1) < 1e-6) return { rateTo: undefined, rateFrom: undefined }
+  if (mode === 'from') return { rateTo: undefined, rateFrom: clampRate(1 / r) }
+  if (mode === 'meet') { const h = Math.sqrt(r); return { rateTo: h, rateFrom: 1 / h } }
+  return { rateTo: r, rateFrom: undefined }
 }
 
 /** Missing means 'vinyl': transitions saved before stretching existed must sound the same */
