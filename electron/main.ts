@@ -1,5 +1,5 @@
 import { app, BrowserWindow, ipcMain, dialog, protocol, net, shell, screen, Menu, Tray, nativeImage } from 'electron'
-import { join, extname, basename, dirname } from 'path'
+import { join, extname, basename, dirname, sep } from 'path'
 import { readdir, readFile, writeFile, rename, mkdir, stat, rm, copyFile, unlink, appendFile } from 'fs/promises'
 import { existsSync, createReadStream, readFileSync, watch as fsWatch } from 'fs'
 import { createHash } from 'crypto'
@@ -1609,6 +1609,17 @@ app.whenReady().then(async () => {
     const previousIds = new Set(cache.tracks.map((t: any) => t.id))
     for (const track of newTracks) {
       cache.trackMap.set(track.path, track)
+    }
+
+    // Drop tracks under this folder whose files are gone (deleted, moved or renamed).
+    // Skipped when the folder itself is missing, e.g. an unplugged drive, so its
+    // tracks come back when it does instead of being wiped.
+    if (existsSync(folderPath)) {
+      const found = new Set(audioFiles)
+      const prefix = folderPath.endsWith(sep) ? folderPath : folderPath + sep
+      for (const path of [...cache.trackMap.keys()]) {
+        if (path.startsWith(prefix) && !found.has(path)) cache.trackMap.delete(path)
+      }
     }
     cache.tracks = Array.from(cache.trackMap.values())
     rebuildIndexes()

@@ -688,7 +688,9 @@ async function load() {
   } catch (err) {
     if (token !== loadToken) return
     status.value = 'error'
-    errorMessage.value = `Couldn't decode the audio: ${err}`
+    errorMessage.value = /\b404\b/.test(String(err))
+      ? "One of these songs' files can't be found. It may have been moved or deleted. Rescan your library in Settings, then try again."
+      : `Couldn't decode the audio: ${err}`
     return
   }
 
