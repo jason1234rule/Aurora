@@ -12,7 +12,8 @@ import { useTransitionsStore } from '@/stores/transitions'
 import { useLibraryStore } from '@/stores/library'
 
 type AddOptions = Partial<Pick<Transition,
-  'type' | 'exitAt' | 'entryAt' | 'overlap' | 'fadeOut' | 'fadeIn' | 'bassSwap' | 'filter' | 'echo' | 'rateTo'>> & {
+  'type' | 'exitAt' | 'entryAt' | 'overlap' | 'fadeOut' | 'fadeIn' | 'fadeOutPoints' | 'fadeInPoints'
+  | 'bassSwap' | 'filter' | 'echo' | 'rateTo'>> & {
   /** 'next' (default) = the track after the current one in the queue; otherwise a track id or "Artist - Title" */
   to?: string
 }

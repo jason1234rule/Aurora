@@ -1,12 +1,13 @@
 import { describe, it, expect } from 'vitest'
 import {
-  buildSchedule, fadeCurve, positionAt, timeAtPosition, rateAt, rampRateToUnity,
+  buildSchedule, fadeCurve, presetVertices, positionAt, timeAtPosition, rateAt, rampRateToUnity,
   toPositionAt, toTimeAt, fromPositionAt, clampRate, effectiveOverlap, planValueAt,
   type ParamEvent, type TransitionSchedule,
 } from '@/utils/transitions/schedule'
 import type { Transition } from '@/types/transition'
 
-type Timing = Pick<Transition, 'type' | 'exitAt' | 'entryAt' | 'overlap' | 'fadeOut' | 'fadeIn' | 'bassSwap' | 'filter' | 'echo' | 'rateTo'>
+type Timing = Pick<Transition, 'type' | 'exitAt' | 'entryAt' | 'overlap' | 'fadeOut' | 'fadeIn' | 'fadeOutPoints' | 'fadeInPoints'
+  | 'bassSwap' | 'filter' | 'echo' | 'rateTo'>
 
 function timing(over: Partial<Timing> = {}): Timing {
   return { type: 'blend', exitAt: 100, entryAt: 8, overlap: 8, fadeOut: 'equal-power', fadeIn: 'equal-power', ...over }
@@ -31,6 +32,41 @@ describe('fade curves', () => {
   it('equal-power keeps constant power', () => {
     const fi = fadeCurve('equal-power', 'in'), fo = fadeCurve('equal-power', 'out')
     for (let i = 0; i < fi.length; i++) expect(fi[i] ** 2 + fo[i] ** 2).toBeCloseTo(1, 5)
+  })
+  it("'none' holds full volume and only moves on the outermost step", () => {
+    const fi = fadeCurve('none', 'in'), fo = fadeCurve('none', 'out')
+    expect(fi[0]).toBe(0)
+    expect(fo[fo.length - 1]).toBe(0)
+    for (let i = 1; i < fi.length; i++) expect(fi[i]).toBe(1)
+    for (let i = 0; i < fo.length - 1; i++) expect(fo[i]).toBe(1)
+  })
+  it('custom fades pass through their vertices with fixed ends', () => {
+    const fo = fadeCurve('custom', 'out', 101, [{ x: 0.5, y: 0.8 }, { x: 0.25, y: 0.9 }])
+    expect(fo[0]).toBeCloseTo(1, 6)
+    expect(fo[25]).toBeCloseTo(0.9, 6)
+    expect(fo[50]).toBeCloseTo(0.8, 6)
+    expect(fo[75]).toBeCloseTo(0.4, 6)
+    expect(fo[100]).toBeCloseTo(0, 6)
+    const fi = fadeCurve('custom', 'in', 101, [{ x: 0.5, y: 2 }])
+    expect(fi[0]).toBeCloseTo(0, 6)
+    expect(fi[50]).toBeCloseTo(1, 6) // gain clamped to 1
+    expect(fi[100]).toBeCloseTo(1, 6)
+  })
+  it('custom fades without vertices are linear', () => {
+    const custom = fadeCurve('custom', 'in', 64), linear = fadeCurve('linear', 'in', 64)
+    for (let i = 0; i < 64; i++) expect(custom[i]).toBeCloseTo(linear[i], 6)
+  })
+  it('presetVertices sit on the preset curve', () => {
+    const curve = fadeCurve('equal-power', 'out', 1025)
+    for (const p of presetVertices('equal-power', 'out')) expect(p.y).toBeCloseTo(curve[Math.round(p.x * 1024)], 6)
+  })
+  it('the schedule uses custom fade points', () => {
+    const s = buildSchedule(
+      timing({ fadeOut: 'custom', fadeOutPoints: [{ x: 0.5, y: 0.2 }] }),
+      { t0: 10, leadIn: 1, fromWindowStart: 0, toWindowStart: 0 },
+    )
+    const curve = s.fromGain.events.find(e => e.type === 'curve')
+    expect(curve?.type === 'curve' && curve.values[Math.round((curve.values.length - 1) / 2)]).toBeCloseTo(0.2, 2)
   })
 })
 

@@ -11,7 +11,7 @@
  * `t0` is the ctx time at which FROM's `exitAt` is heard; TO's `entryAt` is
  * heard at the same instant.
  */
-import type { CurvePreset, Transition } from '@/types/transition'
+import type { CurvePreset, FadePoint, Transition } from '@/types/transition'
 
 export const MAX_RATE_DEVIATION = 0.03
 export const MIN_OVERLAP = 0.05
@@ -76,7 +76,8 @@ export interface ScheduleOptions {
 
 /** The parts of a Transition that affect how it sounds */
 export type TransitionTiming = Pick<Transition,
-  'type' | 'exitAt' | 'entryAt' | 'overlap' | 'fadeOut' | 'fadeIn' | 'bassSwap' | 'filter' | 'echo' | 'rateTo'>
+  'type' | 'exitAt' | 'entryAt' | 'overlap' | 'fadeOut' | 'fadeIn' | 'fadeOutPoints' | 'fadeInPoints'
+  | 'bassSwap' | 'filter' | 'echo' | 'rateTo'>
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
 
@@ -91,21 +92,70 @@ export function effectiveOverlap(t: Pick<Transition, 'type' | 'overlap'>): numbe
   return t.overlap
 }
 
-/** Gain curve for a fade. 'in' rises 0→1, 'out' falls 1→0 (mirror image of 'in'). */
-export function fadeCurve(preset: CurvePreset, direction: 'in' | 'out', points = 256): Float32Array {
+/**
+ * Gain curve for a fade. 'in' rises 0→1, 'out' falls 1→0 (mirror image of 'in').
+ * 'none' stays at full volume and only drops (or rises) in the last (first) of the
+ * `points` steps, which at 256 points over a typical overlap is a click-free ~30 ms.
+ * 'custom' is piecewise linear through `vertices` between the fixed end points.
+ */
+export function fadeCurve(preset: CurvePreset, direction: 'in' | 'out', points = 256, vertices?: FadePoint[]): Float32Array {
+  const out = new Float32Array(points)
+  if (preset === 'custom') {
+    const knots = fadeKnots(direction, vertices)
+    for (let i = 0; i < points; i++) out[i] = evalKnots(knots, i / (points - 1))
+    return out
+  }
   const shape = (x: number) => {
     switch (preset) {
       case 'equal-power': return Math.sin(x * Math.PI / 2)
       case 's-curve': return x * x * (3 - 2 * x)
+      case 'none': return x > 0 ? 1 : 0
       default: return x
     }
   }
-  const out = new Float32Array(points)
   for (let i = 0; i < points; i++) {
     const x = i / (points - 1)
     out[i] = shape(direction === 'in' ? x : 1 - x)
   }
   return out
+}
+
+/** The fade-out (FROM) or fade-in (TO) curve of a transition, honouring custom points. */
+export function transitionFade(t: Pick<Transition, 'fadeOut' | 'fadeIn' | 'fadeOutPoints' | 'fadeInPoints'>, direction: 'in' | 'out', points = 256): Float32Array {
+  return direction === 'out'
+    ? fadeCurve(t.fadeOut, 'out', points, t.fadeOutPoints)
+    : fadeCurve(t.fadeIn, 'in', points, t.fadeInPoints)
+}
+
+/** All knots of a custom fade, fixed ends included, sorted and clamped. */
+export function fadeKnots(direction: 'in' | 'out', vertices: FadePoint[] = []): FadePoint[] {
+  const inner = vertices
+    .filter(p => isFinite(p.x) && isFinite(p.y) && p.x > 0 && p.x < 1)
+    .map(p => ({ x: p.x, y: clamp(p.y, 0, 1) }))
+    .sort((a, b) => a.x - b.x)
+  return direction === 'out'
+    ? [{ x: 0, y: 1 }, ...inner, { x: 1, y: 0 }]
+    : [{ x: 0, y: 0 }, ...inner, { x: 1, y: 1 }]
+}
+
+function evalKnots(knots: FadePoint[], x: number): number {
+  for (let i = 0; i < knots.length - 1; i++) {
+    const a = knots[i], b = knots[i + 1]
+    if (x <= b.x) return b.x === a.x ? b.y : a.y + (b.y - a.y) * (x - a.x) / (b.x - a.x)
+  }
+  return knots[knots.length - 1].y
+}
+
+/** Interior vertices that approximate a preset, to start a custom fade from what was there. */
+export function presetVertices(preset: CurvePreset, direction: 'in' | 'out', count = 3): FadePoint[] {
+  if (preset === 'custom' || preset === 'linear') return [{ x: 0.5, y: 0.5 }]
+  const curve = fadeCurve(preset, direction, 1025)
+  const pts: FadePoint[] = []
+  for (let i = 1; i <= count; i++) {
+    const x = i / (count + 1)
+    pts.push({ x, y: curve[Math.round(x * 1024)] })
+  }
+  return pts
 }
 
 // ── Playback-rate integration ───────────────────────────────────────────────
@@ -217,11 +267,11 @@ export function buildSchedule(t: TransitionTiming, opts: ScheduleOptions): Trans
     fromStopAt = t0 + 0.05
   } else if (kind === 'echo-out') {
     fromGain.events.push({ type: 'set', time: t0, value: 1 }, { type: 'linear', time: t0 + ECHO_DRY_CUT, value: 0 })
-    toGain.events.push({ type: 'curve', time: t0, duration: overlap, values: fadeCurve(t.fadeIn, 'in') })
+    toGain.events.push({ type: 'curve', time: t0, duration: overlap, values: transitionFade(t, 'in') })
     fromStopAt = t0 + ECHO_DRY_CUT + 0.05
   } else {
-    fromGain.events.push({ type: 'curve', time: t0, duration: overlap, values: fadeCurve(t.fadeOut, 'out') })
-    toGain.events.push({ type: 'curve', time: t0, duration: overlap, values: fadeCurve(t.fadeIn, 'in') })
+    fromGain.events.push({ type: 'curve', time: t0, duration: overlap, values: transitionFade(t, 'out') })
+    toGain.events.push({ type: 'curve', time: t0, duration: overlap, values: transitionFade(t, 'in') })
     fromStopAt = overlapEnd + 0.05
   }
 
@@ -271,7 +321,7 @@ export function buildSchedule(t: TransitionTiming, opts: ScheduleOptions): Trans
       delay,
       feedback,
       send: { initial: 0, events: send },
-      wet: { initial: 1, events: [{ type: 'curve', time: t0, duration: overlap, values: fadeCurve(t.fadeOut, 'out') }] },
+      wet: { initial: 1, events: [{ type: 'curve', time: t0, duration: overlap, values: transitionFade(t, 'out') }] },
     }
   }
 

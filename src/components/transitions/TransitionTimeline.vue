@@ -10,7 +10,8 @@
       @pointercancel="onPointerUp"
       @pointerleave="hover = null"
       @wheel.prevent="onWheel"
-      @dblclick="fit"
+      @dblclick="onDoubleClick"
+      @contextmenu.prevent="onContextMenu"
     />
   </div>
 </template>
@@ -21,11 +22,14 @@
  * Drag TO to align it, drag the exit / overlap-end lines and the bass-swap
  * diamond, drag FROM (or the ruler) to pan, wheel to zoom (horizontal wheel pans).
  * Hold Alt to drag without snapping to beats.
+ *
+ * Fade curves work like volume keyframes in a video editor: double-click a curve
+ * to add a vertex, drag vertices, right-click (or select + Delete) to remove one.
  */
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
-import type { BeatGrid } from '@/types/transition'
+import type { BeatGrid, FadePoint } from '@/types/transition'
 import type { TransitionTiming } from '@/utils/transitions/schedule'
-import { effectiveOverlap, fadeCurve } from '@/utils/transitions/schedule'
+import { effectiveOverlap, transitionFade, fadeKnots, presetVertices } from '@/utils/transitions/schedule'
 import { mixMapping, moveExit, slideTo, type MixMapping } from '@/utils/transitions/timeline'
 import type { PeakPyramid } from '@/utils/transitions/peaks'
 import { beatTime, beatIndexAt, isDownbeat, nearestBeat } from '@/utils/transitions/beatgrid'
@@ -202,7 +206,9 @@ function draw() {
 
   // Fade curves over the overlap
   if (ov > 0 && xEnd - xExit > 4) {
-    const drawCurve = (values: Float32Array, top: number) => {
+    const drawCurve = (fade: Fade, values: Float32Array) => {
+      const top = laneTop(fade)
+      const hot = hover.value?.fade === fade || drag?.fade === fade
       ctx.beginPath()
       for (let i = 0; i < values.length; i++) {
         const x = xExit + (xEnd - xExit) * (i / (values.length - 1))
@@ -210,12 +216,39 @@ function draw() {
         if (i === 0) ctx.moveTo(x, y)
         else ctx.lineTo(x, y)
       }
-      ctx.strokeStyle = ink(0.6)
-      ctx.lineWidth = 1.5
+      ctx.strokeStyle = hot ? ink(0.9) : ink(0.6)
+      ctx.lineWidth = hot ? 2 : 1.5
       ctx.stroke()
+
+      if (!isCustom(fade)) return
+      // Vertices: fixed ends hollow, movable ones filled; the active one gets its level
+      const knots = fadeKnots(fade, pointsOf(fade))
+      knots.forEach((k, i) => {
+        const { x, y } = knotXY(fade, k)
+        const fixed = i === 0 || i === knots.length - 1
+        const active = !fixed && (activeVertex()?.fade === fade && activeVertex()?.index === i - 1)
+        ctx.beginPath()
+        ctx.arc(x, y, active ? 5.5 : 4, 0, Math.PI * 2)
+        if (fixed) {
+          ctx.strokeStyle = ink(0.5)
+          ctx.lineWidth = 1.5
+          ctx.stroke()
+        } else {
+          ctx.fillStyle = active ? acc(1) : ink(0.95)
+          ctx.fill()
+        }
+        if (active) {
+          ctx.font = '600 10px ui-sans-serif, system-ui, sans-serif'
+          ctx.textBaseline = 'bottom'
+          ctx.fillStyle = ink(0.9)
+          const label = `${formatDb(k.y)} · +${(k.x * ov).toFixed(2)}s`
+          const lx = Math.min(x + 8, w - ctx.measureText(label).width - 4)
+          ctx.fillText(label, lx, Math.max(top + 12, y - 6))
+        }
+      })
     }
-    drawCurve(fadeCurve(t.fadeOut, 'out', 64), FROM_TOP)
-    drawCurve(fadeCurve(t.fadeIn, 'in', 64), TO_TOP)
+    drawCurve('out', transitionFade(t, 'out', 256))
+    drawCurve('in', transitionFade(t, 'in', 256))
   }
 
   // Exit / overlap-end lines
@@ -263,9 +296,9 @@ function draw() {
   ctx.font = '600 10px ui-sans-serif, system-ui, sans-serif'
   ctx.textBaseline = 'top'
   ctx.fillStyle = ink(0.55)
-  ctx.fillText(`FROM · ${props.fromLabel}`, 8, FROM_TOP + 6)
+  ctx.fillText(`Outgoing · ${props.fromLabel}`, 8, FROM_TOP + 6)
   ctx.fillStyle = acc(0.9)
-  ctx.fillText(`TO · ${props.toLabel}`, 8, TO_TOP + 6)
+  ctx.fillText(`Incoming · ${props.toLabel}`, 8, TO_TOP + 6)
 
   // Hover guide
   if (hover.value?.target === 'exit' || hover.value?.target === 'overlapEnd' || hover.value?.target === 'bass') {
@@ -283,29 +316,136 @@ function draw() {
   }
 }
 
+// ── Fade vertices ──────────────────────────────────────────────────────────
+type Fade = 'out' | 'in'
+const VERTEX_PX = 7
+const CURVE_PX = 6
+
+const laneTop = (fade: Fade) => (fade === 'out' ? FROM_TOP : TO_TOP)
+const isCustom = (fade: Fade) => (fade === 'out' ? props.timing.fadeOut : props.timing.fadeIn) === 'custom'
+const pointsOf = (fade: Fade): FadePoint[] =>
+  (fade === 'out' ? props.timing.fadeOutPoints : props.timing.fadeInPoints) ?? []
+
+function knotXY(fade: Fade, k: FadePoint) {
+  const xExit = xOf(props.timing.exitAt), xEnd = xOf(props.timing.exitAt + overlap.value)
+  return { x: xExit + (xEnd - xExit) * k.x, y: laneTop(fade) + LANE - k.y * (LANE - 2) - 1 }
+}
+
+function gainAtY(fade: Fade, y: number) {
+  return Math.max(0, Math.min(1, (laneTop(fade) + LANE - 1 - y) / (LANE - 2)))
+}
+
+const formatDb = (g: number) => (g <= 0.0001 ? '−∞ dB' : `${(20 * Math.log10(g)).toFixed(1)} dB`)
+
+function emitPoints(fade: Fade, points: FadePoint[]) {
+  const sorted = [...points].sort((a, b) => a.x - b.x)
+  emit('update', fade === 'out'
+    ? { fadeOut: 'custom', fadeOutPoints: sorted }
+    : { fadeIn: 'custom', fadeInPoints: sorted })
+}
+
+/** Vertex currently selected (last clicked), as an index into the interior points */
+const selected = ref<{ fade: Fade; index: number } | null>(null)
+const activeVertex = () => (drag?.fade !== undefined && drag.index !== undefined
+  ? { fade: drag.fade, index: drag.index }
+  : hover.value?.target === 'vertex' ? { fade: hover.value.fade!, index: hover.value.index! } : selected.value)
+
 // ── Interaction ────────────────────────────────────────────────────────────
-type Target = 'exit' | 'overlapEnd' | 'bass' | 'to' | 'pan'
-const hover = ref<{ target: Target; x: number } | null>(null)
-let drag: { target: Target; startX: number; startTiming: TransitionTiming; startView: [number, number]; moved: boolean } | null = null
+type Target = 'exit' | 'overlapEnd' | 'bass' | 'to' | 'pan' | 'vertex' | 'curve'
+interface Hit { target: Target; fade?: Fade; index?: number }
+const hover = ref<(Hit & { x: number }) | null>(null)
+let drag: (Hit & { startX: number; startTiming: TransitionTiming; startView: [number, number]; moved: boolean }) | null = null
 
 const cursor = computed(() => {
   const target = drag?.target ?? hover.value?.target
+  if (target === 'vertex') return drag ? 'grabbing' : 'move'
+  if (target === 'curve') return 'copy'
   if (target === 'exit' || target === 'overlapEnd' || target === 'bass') return 'ew-resize'
   if (target === 'to') return drag ? 'grabbing' : 'grab'
   return drag ? 'grabbing' : 'default'
 })
 
-function hitTest(x: number, y: number): Target {
+function hitTest(x: number, y: number): Hit {
   const t = props.timing
   const ov = overlap.value
+  if (ov > 0) {
+    // Vertices win over everything so they stay grabbable near the exit / overlap-end lines
+    for (const fade of ['out', 'in'] as const) {
+      if (!isCustom(fade)) continue
+      const pts = [...pointsOf(fade)].sort((a, b) => a.x - b.x)
+      for (let i = 0; i < pts.length; i++) {
+        const p = knotXY(fade, pts[i])
+        if (Math.hypot(x - p.x, y - p.y) <= VERTEX_PX) return { target: 'vertex', fade, index: i }
+      }
+    }
+  }
   if (t.bassSwap && ov > 0) {
     const xb = xOf(t.exitAt + t.bassSwap.at)
-    if (Math.abs(x - xb) <= HANDLE_PX + 2 && Math.abs(y - (TO_TOP - GAP / 2)) <= 12) return 'bass'
+    if (Math.abs(x - xb) <= HANDLE_PX + 2 && Math.abs(y - (TO_TOP - GAP / 2)) <= 12) return { target: 'bass' }
   }
-  if (ov > 0 && Math.abs(x - xOf(t.exitAt + ov)) <= HANDLE_PX) return 'overlapEnd'
-  if (Math.abs(x - xOf(t.exitAt)) <= HANDLE_PX) return 'exit'
-  if (y >= TO_TOP) return 'to'
-  return 'pan'
+  if (ov > 0 && Math.abs(x - xOf(t.exitAt + ov)) <= HANDLE_PX) return { target: 'overlapEnd' }
+  if (Math.abs(x - xOf(t.exitAt)) <= HANDLE_PX) return { target: 'exit' }
+  const curve = curveAt(x, y)
+  if (curve) return { target: 'curve', fade: curve }
+  if (y >= TO_TOP) return { target: 'to' }
+  return { target: 'pan' }
+}
+
+/** The fade whose curve passes within a few px of (x, y), if any */
+function curveAt(x: number, y: number): Fade | null {
+  const ov = overlap.value
+  const xExit = xOf(props.timing.exitAt), xEnd = xOf(props.timing.exitAt + ov)
+  if (ov <= 0 || x <= xExit || x >= xEnd) return null
+  const frac = (x - xExit) / (xEnd - xExit)
+  for (const fade of ['out', 'in'] as const) {
+    const top = laneTop(fade)
+    if (y < top || y > top + LANE) continue
+    const values = transitionFade(props.timing, fade, 512)
+    const v = values[Math.round(frac * (values.length - 1))]
+    if (Math.abs(y - (top + LANE - v * (LANE - 2) - 1)) <= CURVE_PX) return fade
+  }
+  return null
+}
+
+function onDoubleClick(e: MouseEvent) {
+  const r = canvasRef.value!.getBoundingClientRect()
+  const x = e.clientX - r.left, y = e.clientY - r.top
+  const hit = hitTest(x, y)
+  if (hit.target !== 'curve' || !hit.fade) { fit(); return }
+  const fade = hit.fade
+  const xExit = xOf(props.timing.exitAt), xEnd = xOf(props.timing.exitAt + overlap.value)
+  const point = { x: (x - xExit) / (xEnd - xExit), y: gainAtY(fade, y) }
+  // Turning a preset into a custom fade starts from the preset's shape
+  const base = isCustom(fade) ? pointsOf(fade) : presetVertices(fade === 'out' ? props.timing.fadeOut : props.timing.fadeIn, fade)
+  const points = [...base.filter(p => Math.abs(p.x - point.x) > 0.01), point].sort((a, b) => a.x - b.x)
+  emitPoints(fade, points)
+  selected.value = { fade, index: points.indexOf(point) }
+  emit('commit')
+}
+
+function removeVertex(fade: Fade, index: number) {
+  const pts = [...pointsOf(fade)].sort((a, b) => a.x - b.x)
+  pts.splice(index, 1)
+  emitPoints(fade, pts)
+  selected.value = null
+  emit('commit')
+}
+
+function onContextMenu(e: MouseEvent) {
+  const r = canvasRef.value!.getBoundingClientRect()
+  const hit = hitTest(e.clientX - r.left, e.clientY - r.top)
+  if (hit.target === 'vertex') removeVertex(hit.fade!, hit.index!)
+}
+
+function onKeydown(e: KeyboardEvent) {
+  if (!selected.value || (e.key !== 'Delete' && e.key !== 'Backspace')) return
+  const { fade, index } = selected.value
+  if (!isCustom(fade) || index >= pointsOf(fade).length) { selected.value = null; return }
+  const el = e.target as HTMLElement
+  if (el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA' || el?.tagName === 'SELECT' || el?.isContentEditable) return
+  e.preventDefault()
+  e.stopPropagation()
+  removeVertex(fade, index)
 }
 
 function localXY(e: PointerEvent | WheelEvent) {
@@ -321,24 +461,40 @@ function snapFrom(tm: number, e: PointerEvent): number {
 function onPointerDown(e: PointerEvent) {
   if (e.button !== 0) return
   const { x, y } = localXY(e)
-  const target = hitTest(x, y)
-  drag = { target, startX: x, startTiming: { ...props.timing }, startView: [viewStart.value, viewEnd.value], moved: false }
+  let hit = hitTest(x, y)
+  selected.value = hit.target === 'vertex' ? { fade: hit.fade!, index: hit.index! } : null
+  // Curves only react to double-clicks; dragging one behaves like dragging its lane
+  if (hit.target === 'curve') hit = { target: hit.fade === 'in' ? 'to' : 'pan' }
+  drag = { ...hit, startX: x, startTiming: { ...props.timing }, startView: [viewStart.value, viewEnd.value], moved: false }
   canvasRef.value!.setPointerCapture(e.pointerId)
 }
 
 function onPointerMove(e: PointerEvent) {
   const { x, y } = localXY(e)
   if (!drag) {
-    hover.value = { target: hitTest(x, y), x }
+    hover.value = { ...hitTest(x, y), x }
     return
   }
   const dx = x - drag.startX
-  if (Math.abs(dx) > 1) drag.moved = true
+  if (Math.abs(dx) > 1 || drag.target === 'vertex') drag.moved = true
   if (!drag.moved) return
   const t0 = drag.startTiming
   const ov = effectiveOverlap(t0)
 
   switch (drag.target) {
+    case 'vertex': {
+      const fade = drag.fade!
+      const pts = [...((fade === 'out' ? t0.fadeOutPoints : t0.fadeInPoints) ?? [])].sort((a, b) => a.x - b.x)
+      const i = drag.index!
+      // Stay between the neighbouring vertices (or the fixed ends)
+      const lo = (i > 0 ? pts[i - 1].x : 0) + 0.001
+      const hi = (i < pts.length - 1 ? pts[i + 1].x : 1) - 0.001
+      let time = t0.exitAt + ((x - xOf(t0.exitAt)) / (xOf(t0.exitAt + ov) - xOf(t0.exitAt))) * ov
+      time = snapFrom(time, e)
+      pts[i] = { x: Math.max(lo, Math.min(hi, (time - t0.exitAt) / ov)), y: gainAtY(fade, y) }
+      emitPoints(fade, pts)
+      break
+    }
     case 'pan': {
       const dt = dx * spp.value
       viewStart.value = drag.startView[0] - dt
@@ -379,7 +535,7 @@ function onPointerMove(e: PointerEvent) {
 
 function onPointerUp(e: PointerEvent) {
   if (!drag) return
-  const moved = drag.moved && drag.target !== 'pan'
+  const moved = drag.moved && drag.target !== 'pan' && drag.target !== 'curve'
   drag = null
   try { canvasRef.value!.releasePointerCapture(e.pointerId) } catch { /* already released */ }
   if (moved) emit('commit')
@@ -407,15 +563,17 @@ onMounted(() => {
   width.value = wrapRef.value?.clientWidth || 800
   fit()
   scheduleDraw()
+  document.addEventListener('keydown', onKeydown, { capture: true })
 })
 
 onBeforeUnmount(() => {
+  document.removeEventListener('keydown', onKeydown, { capture: true })
   resizeObs?.disconnect()
   if (raf) cancelAnimationFrame(raf)
 })
 
 watch(
-  () => [props.timing, props.fromPeaks, props.toPeaks, props.fromGrid, props.toGrid, props.playhead, viewStart.value, viewEnd.value, width.value, hover.value],
+  () => [props.timing, props.fromPeaks, props.toPeaks, props.fromGrid, props.toGrid, props.playhead, viewStart.value, viewEnd.value, width.value, hover.value, selected.value],
   scheduleDraw,
   { deep: true },
 )

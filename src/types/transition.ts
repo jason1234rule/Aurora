@@ -1,6 +1,17 @@
 /** Hand-made transitions ("mixes") between two specific songs. */
 
-export type CurvePreset = 'linear' | 'equal-power' | 's-curve'
+/** 'none' holds full volume for the whole overlap; 'custom' follows the transition's fade points */
+export type CurvePreset = 'linear' | 'equal-power' | 's-curve' | 'none' | 'custom'
+
+/**
+ * A vertex on a custom fade, like a volume keyframe in a video editor.
+ * x: 0–1 through the overlap, y: gain 0–1. The ends are fixed (a fade-out runs
+ * 1 → 0, a fade-in 0 → 1), so only the points in between are stored.
+ */
+export interface FadePoint {
+  x: number
+  y: number
+}
 export type TransitionType = 'blend' | 'cut' | 'echo-out'
 
 export interface TransitionEndpoint {
@@ -34,6 +45,10 @@ export interface Transition {
   overlap: number
   fadeOut: CurvePreset
   fadeIn: CurvePreset
+  /** Interior vertices of FROM's fade when fadeOut is 'custom', sorted by x */
+  fadeOutPoints?: FadePoint[]
+  /** Interior vertices of TO's fade when fadeIn is 'custom', sorted by x */
+  fadeInPoints?: FadePoint[]
   /** Seconds into the overlap where FROM's lows are swapped for TO's */
   bassSwap?: { at: number }
   filter?: TransitionFilter
