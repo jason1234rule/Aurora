@@ -1,6 +1,6 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 
-const PERSIST_ROUTES = ['/', '/albums', '/artists', '/soundtracks', '/playlists', '/settings', '/folders', '/favorites', '/stats']
+const PERSIST_ROUTES = ['/', '/albums', '/artists', '/soundtracks', '/playlists', '/settings', '/folders', '/favorites', '/stats', '/transitions']
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -74,6 +74,17 @@ const router = createRouter({
       path: '/stats',
       name: 'stats',
       component: () => import('@/views/StatsView.vue'),
+    },
+    {
+      path: '/transitions',
+      name: 'transitions',
+      component: () => import('@/views/TransitionsView.vue'),
+    },
+    {
+      // ?id=<transition id>, or ?from=<track id>&to=<track id> for a new one
+      path: '/transition/edit',
+      name: 'transition-edit',
+      component: () => import('@/views/TransitionEditorView.vue'),
     },
     {
       path: '/search',

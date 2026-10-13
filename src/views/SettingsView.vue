@@ -451,6 +451,42 @@
           </div>
         </div>
 
+        <!-- Hand-made transitions -->
+        <div class="px-4 py-3 rounded-xl bg-white/[0.05]">
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-sm text-white/80">Hand-made transitions</p>
+              <p class="text-xs text-white/30 mt-0.5">Play your saved transitions between songs (they take priority over crossfade)</p>
+            </div>
+            <button
+              @click="player.setTransitionsEnabled(!player.transitionsEnabled)"
+              class="relative w-11 h-6 rounded-full transition-colors duration-200"
+              :class="player.transitionsEnabled ? 'bg-accent' : 'bg-white/15'"
+            >
+              <div
+                class="absolute top-0.5 w-5 h-5 rounded-full bg-control shadow transition-transform duration-200"
+                :class="player.transitionsEnabled ? 'translate-x-[22px]' : 'translate-x-0.5'"
+              />
+            </button>
+          </div>
+          <div class="flex items-center justify-between mt-3 pt-3 border-t border-white/[0.06]">
+            <div>
+              <p class="text-sm text-white/80">Mix mode</p>
+              <p class="text-xs text-white/30 mt-0.5">Choose each next song by following your transitions (falls back to the queue)</p>
+            </div>
+            <button
+              @click="player.setMixMode(!player.mixMode)"
+              class="relative w-11 h-6 rounded-full transition-colors duration-200"
+              :class="player.mixMode ? 'bg-accent' : 'bg-white/15'"
+            >
+              <div
+                class="absolute top-0.5 w-5 h-5 rounded-full bg-control shadow transition-transform duration-200"
+                :class="player.mixMode ? 'translate-x-[22px]' : 'translate-x-0.5'"
+              />
+            </button>
+          </div>
+        </div>
+
         <!-- Lyrics offset -->
         <div class="px-4 py-3 rounded-xl bg-white/[0.05]">
           <div class="flex items-center justify-between mb-2">
@@ -1616,7 +1652,7 @@ const sectionKeywords: Record<string, string[]> = {
   'Discord Rich Presence': ['discord', 'rpc', 'activity', 'presence', 'status'],
   'Search': ['search lyrics', 'lyrics search'],
   'Audio Output': ['audio', 'output', 'device', 'speaker', 'sound', 'sink'],
-  'Playback': ['playback', 'queue', 'shuffle', 'crossfade', 'player', 'volume', 'gapless'],
+  'Playback': ['playback', 'queue', 'shuffle', 'crossfade', 'player', 'volume', 'gapless', 'transitions', 'mix'],
   'Appearance': ['theme', 'color', 'accent', 'font', 'ui', 'dark', 'window', 'opacity', 'blur'],
   'Animated Covers': ['animation', 'cover', 'album art', 'animated'],
   'Behavior': ['behavior', 'window', 'minimize', 'tray', 'startup', 'close'],

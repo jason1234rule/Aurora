@@ -65,6 +65,13 @@ contextBridge.exposeInMainWorld('api', {
   removeAlbumTags: (albumKeys: string[], tagsToRemove: string[]): Promise<{ trackTags: Record<string, string[]>; albumTags: Record<string, string[]> }> => ipcRenderer.invoke('tags:remove-album-tags', albumKeys, tagsToRemove),
   applyTagsSync: (merged: { trackTags: Record<string, string[]>; albumTags: Record<string, string[]> }): Promise<{ trackTags: Record<string, string[]>; albumTags: Record<string, string[]> }> => ipcRenderer.invoke('tags:apply-sync', merged),
 
+  // Hand-made transitions
+  getTransitions: () => ipcRenderer.invoke('transitions:get'),
+  saveTransition: (transition: any) => ipcRenderer.invoke('transitions:save', transition),
+  deleteTransition: (id: string) => ipcRenderer.invoke('transitions:delete', id),
+  getBeatGrid: (filePath: string) => ipcRenderer.invoke('beatgrid:get', filePath),
+  saveBeatGrid: (filePath: string, grid: any) => ipcRenderer.invoke('beatgrid:set', filePath, grid),
+
   // Discord RPC
   updateDiscordPresence: (data: any) => ipcRenderer.invoke('discord:update-presence', data),
   toggleDiscordRPC: (enabled: boolean, clientId?: string) => ipcRenderer.invoke('discord:toggle', enabled, clientId),

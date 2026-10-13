@@ -427,6 +427,28 @@ function scheduleWaveformFlush() {
   }, 5000)
 }
 
+// ── Beat grid disk cache (hand-made transitions editor) ────────────────────
+// Keyed by path; an entry only counts while the file's mtime and size match.
+const beatgridCachePath = join(cachePath, 'beatgrid-cache.json')
+let beatgridCache: Record<string, { mtimeMs: number; size: number; grid: any }> | null = null
+let beatgridFlushTimer: ReturnType<typeof setTimeout> | null = null
+
+async function getBeatgridCache() {
+  if (beatgridCache) return beatgridCache
+  try {
+    beatgridCache = existsSync(beatgridCachePath) ? JSON.parse(await readFile(beatgridCachePath, 'utf-8')) : {}
+  } catch { beatgridCache = {} }
+  return beatgridCache!
+}
+
+function scheduleBeatgridFlush() {
+  if (beatgridFlushTimer) return
+  beatgridFlushTimer = setTimeout(async () => {
+    beatgridFlushTimer = null
+    try { await writeFile(beatgridCachePath, JSON.stringify(beatgridCache)) } catch {}
+  }, 3000)
+}
+
 // ── In-memory library cache ────────────────────────────────────────────────
 // Loaded once at startup, mutated in place, flushed to disk on changes.
 // This eliminates repeated disk reads on every IPC call.
@@ -722,6 +744,52 @@ async function loadTags(): Promise<{ trackTags: Record<string, string[]>; albumT
 
 async function saveTags(): Promise<void> {
   await writeFile(tagsPath, JSON.stringify({ trackTags: trackTagsData, albumTags: albumTagsData }, null, 2))
+}
+
+// ── Hand-made transitions persistence ──────────────────────────────────────
+// User-authored song→song transitions, keyed by "fromSongKey→toSongKey".
+const transitionsPath = join(dataPath, 'transitions.json')
+let transitionsData: Record<string, any> = {}
+let transitionsLoaded = false
+
+async function loadTransitions(): Promise<Record<string, any>> {
+  if (transitionsLoaded) return transitionsData
+  try {
+    if (existsSync(transitionsPath)) {
+      const raw = JSON.parse(await readFile(transitionsPath, 'utf-8'))
+      transitionsData = raw.transitions || {}
+    }
+  } catch (err) {
+    logger.error('Failed to read transitions.json:', err)
+    transitionsData = {}
+    // Keep the unreadable file so hand-made work isn't lost to the next save
+    try { await rename(transitionsPath, `${transitionsPath}.corrupt-${Date.now()}`) } catch {}
+  }
+  transitionsLoaded = true
+  return transitionsData
+}
+
+// Hand-made work is expensive to redo, so write via a temp file + rename (serialised,
+// like settings, because concurrent saves would share the .tmp name)
+let _transitionsSaveQueue: Promise<void> = Promise.resolve()
+
+function saveTransitions(): Promise<void> {
+  const run = _transitionsSaveQueue.then(async () => {
+    const tmp = transitionsPath + '.tmp'
+    await writeFile(tmp, JSON.stringify({ version: 1, transitions: transitionsData }, null, 2))
+    await rename(tmp, transitionsPath)
+  })
+  // A failed write must not wedge every later one
+  _transitionsSaveQueue = run.catch(() => {})
+  return run
+}
+
+function isValidTransition(t: any): boolean {
+  const num = (v: any) => typeof v === 'number' && isFinite(v)
+  return !!t && typeof t.id === 'string'
+    && typeof t.from?.key === 'string' && typeof t.to?.key === 'string'
+    && ['blend', 'cut', 'echo-out'].includes(t.type)
+    && num(t.exitAt) && num(t.entryAt) && num(t.overlap)
 }
 
 // ── Playlist persistence ───────────────────────────────────────────────────
@@ -1818,6 +1886,47 @@ app.whenReady().then(async () => {
     return { trackTags: trackTagsData, albumTags: albumTagsData }
   })
 
+  // ── IPC: Transitions ──
+  ipcMain.handle('transitions:get', async () => await loadTransitions())
+  ipcMain.handle('transitions:save', async (_, t: any) => {
+    await loadTransitions()
+    if (!isValidTransition(t)) throw new Error('Invalid transition')
+    // A pair holds one transition; drop any older copy of this id (e.g. its songKey changed)
+    for (const [k, v] of Object.entries(transitionsData)) {
+      if (v?.id === t.id) delete transitionsData[k]
+    }
+    transitionsData[`${t.from.key}→${t.to.key}`] = t
+    await saveTransitions()
+    return transitionsData
+  })
+  ipcMain.handle('transitions:delete', async (_, id: string) => {
+    await loadTransitions()
+    for (const [k, v] of Object.entries(transitionsData)) {
+      if (v?.id === id) delete transitionsData[k]
+    }
+    await saveTransitions()
+    return transitionsData
+  })
+
+  // ── IPC: Beat grid cache ──
+  ipcMain.handle('beatgrid:get', async (_, filePath: string) => {
+    try {
+      const entry = (await getBeatgridCache())[filePath]
+      if (!entry) return null
+      const st = await stat(filePath)
+      return entry.mtimeMs === st.mtimeMs && entry.size === st.size ? entry.grid : null
+    } catch { return null }
+  })
+  ipcMain.handle('beatgrid:set', async (_, filePath: string, grid: any) => {
+    try {
+      const st = await stat(filePath)
+      ;(await getBeatgridCache())[filePath] = { mtimeMs: st.mtimeMs, size: st.size, grid }
+      scheduleBeatgridFlush()
+    } catch (err) {
+      logger.error('beatgrid:set failed:', err)
+    }
+  })
+
   // ── IPC: Discord RPC ──
   ipcMain.handle('discord:update-presence', async (_, data) => {
     await updateDiscordPresence(data)
@@ -2795,6 +2904,14 @@ app.whenReady().then(async () => {
         if (existsSync(waveformCachePath)) await rm(waveformCachePath)
         results.waveform = true
       } catch { results.waveform = false }
+    }
+
+    if (targets.includes('beatgrid')) {
+      try {
+        beatgridCache = {}
+        if (existsSync(beatgridCachePath)) await rm(beatgridCachePath)
+        results.beatgrid = true
+      } catch { results.beatgrid = false }
     }
 
     return results
