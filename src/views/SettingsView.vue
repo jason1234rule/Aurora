@@ -485,6 +485,35 @@
               />
             </button>
           </div>
+          <div class="mt-3 pt-3 border-t border-white/[0.06]">
+            <div class="flex items-center justify-between gap-4">
+              <div>
+                <p class="text-sm text-white/80">Meet in the middle</p>
+                <p class="text-xs text-white/30 mt-0.5">
+                  When "Match tempo" should have both songs change speed halfway instead of only the incoming song
+                </p>
+              </div>
+              <select
+                :value="player.autoMeet"
+                @change="player.setAutoMeet(($event.target as HTMLSelectElement).value as 'never' | 'above' | 'always')"
+                class="shrink-0 px-2 py-1.5 rounded-lg bg-white/[0.06] border border-white/[0.08] text-sm text-white/80 outline-none focus:border-accent/40"
+              >
+                <option value="never">Never</option>
+                <option value="above">For big tempo gaps</option>
+                <option value="always">Always</option>
+              </select>
+            </div>
+            <div v-if="player.autoMeet === 'above'" class="flex items-center gap-3 mt-3">
+              <span class="text-xs text-white/40 shrink-0">When the incoming song would change by more than</span>
+              <input
+                type="range" min="1" max="10" step="0.5"
+                :value="player.autoMeetPercent"
+                @input="player.setAutoMeet('above', +($event.target as HTMLInputElement).value)"
+                class="flex-1 accent-accent"
+              />
+              <span class="text-xs text-white/60 tabular-nums w-10 text-right">{{ player.autoMeetPercent }}%</span>
+            </div>
+          </div>
         </div>
 
         <!-- Lyrics offset -->
@@ -1652,7 +1681,7 @@ const sectionKeywords: Record<string, string[]> = {
   'Discord Rich Presence': ['discord', 'rpc', 'activity', 'presence', 'status'],
   'Search': ['search lyrics', 'lyrics search'],
   'Audio Output': ['audio', 'output', 'device', 'speaker', 'sound', 'sink'],
-  'Playback': ['playback', 'queue', 'shuffle', 'crossfade', 'player', 'volume', 'gapless', 'transitions', 'mix'],
+  'Playback': ['playback', 'queue', 'shuffle', 'crossfade', 'player', 'volume', 'gapless', 'transitions', 'mix', 'tempo', 'meet in the middle'],
   'Appearance': ['theme', 'color', 'accent', 'font', 'ui', 'dark', 'window', 'opacity', 'blur'],
   'Animated Covers': ['animation', 'cover', 'album art', 'animated'],
   'Behavior': ['behavior', 'window', 'minimize', 'tray', 'startup', 'close'],

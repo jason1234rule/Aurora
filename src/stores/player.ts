@@ -6,7 +6,7 @@ import {
   TransitionEngine, MEASURE_LEAD, leadInFor, prepWindowFor,
   type PrepareResult, type PreviewHandle, type PreviewOptions,
 } from '@/utils/transitions/engine'
-import type { TransitionTiming } from '@/utils/transitions/schedule'
+import type { TransitionTiming, AutoMeet } from '@/utils/transitions/schedule'
 import { pickNextMix, type MixCandidate } from '@/utils/transitions/mix'
 import { songKey } from '@/utils/smartPlaylistMatcher'
 import type { Transition } from '@/types/transition'
@@ -417,6 +417,11 @@ export const usePlayerStore = defineStore('player', () => {
   const txSkip = new Set<string>()
   let txUiTimer: ReturnType<typeof setInterval> | null = null
 
+  /** When the editor's Match tempo switches to "meet in the middle" (see autoStretchMode) */
+  const autoMeet = ref<AutoMeet>('above')
+  /** Threshold for autoMeet 'above': the incoming song's own speed change, in percent */
+  const autoMeetPercent = ref(6)
+
   // ── Mix mode ─────────────────────────────────────────────────────────────
   // Walks the graph of saved transitions: each time a song starts, the next one
   // is chosen from the transitions out of it (see utils/transitions/mix.ts).
@@ -687,6 +692,8 @@ export const usePlayerStore = defineStore('player', () => {
     if (s.crossfadeDuration !== undefined) crossfadeDuration.value = s.crossfadeDuration
     if (s.transitionsEnabled === false) transitionsEnabled.value = false
     if (s.mixMode === true) mixMode.value = true
+    if (s.autoMeet === 'never' || s.autoMeet === 'above' || s.autoMeet === 'always') autoMeet.value = s.autoMeet
+    if (typeof s.autoMeetPercent === 'number' && isFinite(s.autoMeetPercent)) autoMeetPercent.value = s.autoMeetPercent
   })
 
   // ── MediaSession action handlers (MPRIS integration) ─────────────────────
@@ -1459,6 +1466,12 @@ export const usePlayerStore = defineStore('player', () => {
     if (enabled) scheduleMixPick()
   }
 
+  function setAutoMeet(rule: AutoMeet, percent = autoMeetPercent.value) {
+    autoMeet.value = rule
+    autoMeetPercent.value = Math.max(1, Math.min(10, Math.round(percent * 2) / 2))
+    window.api.mergeSettings({ autoMeet: rule, autoMeetPercent: autoMeetPercent.value })
+  }
+
   /** Snapshot for the dev hook / debugging */
   function transitionDebug() {
     return {
@@ -2081,6 +2094,9 @@ export const usePlayerStore = defineStore('player', () => {
     mixMode,
     mixPicks,
     setMixMode,
+    autoMeet,
+    autoMeetPercent,
+    setAutoMeet,
     isTransitionPreviewing,
     getAudioContext,
     auditionTransition,

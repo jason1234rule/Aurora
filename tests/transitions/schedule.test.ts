@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   buildSchedule, fadeCurve, presetVertices, positionAt, timeAtPosition, rateAt, rampRateToUnity,
-  toPositionAt, toTimeAt, fromPositionAt, clampRate, effectiveOverlap, planValueAt,
+  toPositionAt, toTimeAt, fromPositionAt, clampRate, effectiveOverlap, planValueAt, autoStretchMode,
   type ParamEvent, type TransitionSchedule,
 } from '@/utils/transitions/schedule'
 import type { Transition } from '@/types/transition'
@@ -267,5 +267,23 @@ describe('planValueAt', () => {
   it('exponential ramps interpolate geometrically', () => {
     const plan = { initial: 100, events: [{ type: 'set', time: 0, value: 100 }, { type: 'exponential', time: 2, value: 10000 }] as ParamEvent[] }
     expect(planValueAt(plan, 1)).toBeCloseTo(1000)
+  })
+})
+
+describe('autoStretchMode', () => {
+  it('switches an incoming-song match to meet only past the threshold', () => {
+    expect(autoStretchMode(0.923, 'to', 'above', 0.06)).toBe('meet')
+    expect(autoStretchMode(1.08, 'to', 'above', 0.06)).toBe('meet')
+    expect(autoStretchMode(0.97, 'to', 'above', 0.06)).toBe('to')
+    expect(autoStretchMode(0.94, 'to', 'above', 0.06)).toBe('to') // exactly at the threshold stays
+  })
+  it('honours never / always', () => {
+    expect(autoStretchMode(0.9, 'to', 'never', 0.06)).toBe('to')
+    expect(autoStretchMode(0.99, 'to', 'always', 0.06)).toBe('meet')
+    expect(autoStretchMode(1, 'to', 'always', 0.06)).toBe('to') // nothing to match
+  })
+  it('keeps a deliberate choice', () => {
+    expect(autoStretchMode(0.9, 'from', 'always', 0.06)).toBe('from')
+    expect(autoStretchMode(0.99, 'meet', 'never', 0.06)).toBe('meet')
   })
 })

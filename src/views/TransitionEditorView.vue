@@ -314,7 +314,7 @@
             <span class="text-xs text-white/60 tabular-nums w-14 text-right">{{ ratePercent >= 0 ? '+' : '' }}{{ ratePercent.toFixed(2) }}%</span>
           </div>
           <div class="flex items-center gap-2 ml-[88px] mb-1">
-            <button class="tx-chip" :disabled="!canMatchTempo" @click="matchTempo">Match tempo</button>
+            <button class="tx-chip" :disabled="!canMatchTempo" @click="matchTempo" title="Follows the Meet in the middle setting in Settings → Playback">Match tempo</button>
             <button class="tx-chip" @click="setRates({ rateTo: undefined, rateFrom: undefined })">Reset</button>
           </div>
           <p class="tx-help mt-2 mb-3">{{ tempoSummary }}</p>
@@ -449,7 +449,7 @@ import { getBeatGrid } from '@/utils/transitions/analysis'
 import { suggestTransition } from '@/utils/transitions/suggest'
 import { moveExit, slideTo, fromSpeed } from '@/utils/transitions/timeline'
 import {
-  clampRate, presetVertices, rateRatio, splitRates, pitchOf, rampBackOf, fromPositionAt,
+  clampRate, presetVertices, rateRatio, splitRates, autoStretchMode, pitchOf, rampBackOf, fromPositionAt,
   MAX_RATE_DEVIATION, STRETCH_WARN_DEVIATION, DEFAULT_RAMP_BACK_BARS, MAX_FROM_RAMP, DEFAULT_ECHO, type TransitionTiming,
 } from '@/utils/transitions/schedule'
 import type { Transition, TransitionEndpoint, BeatGrid, CurvePreset, TransitionType, PitchMode, StretchMode } from '@/types/transition'
@@ -843,8 +843,15 @@ function setRatePercent(pct: number) {
   setRates(splitRates(1 + pct / 100, stretchMode.value))
 }
 
+/** Stretch mode for a match of `r`, following the "Meet in the middle" setting */
+function autoModeFor(r: number): StretchMode {
+  return autoStretchMode(r, stretchMode.value, player.autoMeet, player.autoMeetPercent / 100)
+}
+
 function matchTempo() {
-  if (tempoRatio.value !== null) setRates(splitRates(tempoRatio.value, stretchMode.value))
+  if (tempoRatio.value === null) return
+  const mode = autoModeFor(tempoRatio.value)
+  setRates(splitRates(tempoRatio.value, mode), mode !== stretchMode.value ? { stretch: mode } : {})
 }
 
 function setStretchMode(mode: StretchMode) {
@@ -888,7 +895,8 @@ function applySuggestion(userAsked: boolean) {
     to: { grid: toGrid.value, duration: toDuration.value },
   })
   const keep = { type: draft.value.type, fadeOut: draft.value.fadeOut, fadeIn: draft.value.fadeIn }
-  const mode = stretchMode.value
+  const mode = autoModeFor(s.rateTo ?? 1)
+  if (mode !== stretchMode.value) draft.value.stretch = mode
   for (const k of ['bassSwap', 'rateTo', 'rateFrom'] as const) delete draft.value[k]
   Object.assign(draft.value, s)
   // The suggestion matches by changing the incoming song; share that out as the user prefers.

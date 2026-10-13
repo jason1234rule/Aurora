@@ -129,6 +129,21 @@ export function splitRates(ratio: number, mode: StretchMode): Pick<Transition, '
   return { rateTo: r, rateFrom: undefined }
 }
 
+/** When Match tempo / suggestions switch an incoming-song match to 'meet' (a user setting) */
+export type AutoMeet = 'never' | 'above' | 'always'
+
+/**
+ * The stretch mode to use for a tempo match of `ratio`. Only the default 'to' is ever
+ * changed: a deliberate 'meet' or 'from' choice is kept. With 'above', 'meet' kicks in
+ * once the incoming song alone would have to change speed by more than `threshold`.
+ */
+export function autoStretchMode(ratio: number, current: StretchMode, rule: AutoMeet, threshold: number): StretchMode {
+  if (current !== 'to' || rule === 'never') return current
+  const change = Math.abs(clampRate(ratio) - 1)
+  if (change < 1e-6) return current
+  return rule === 'always' || change > threshold + 1e-9 ? 'meet' : current
+}
+
 /** Missing means 'vinyl': transitions saved before stretching existed must sound the same */
 export function pitchOf(t: Pick<Transition, 'pitch'>): PitchMode {
   return t.pitch ?? 'vinyl'

@@ -32,6 +32,12 @@ export interface StretchJob {
 const BLOCK = 128
 /** Rendered then discarded before output time 0, so the stretcher has settled when it counts */
 const PRE_ROLL = 0.25
+/**
+ * Longer analysis blocks than the library default: cleaner chords (noise between partials
+ * −48 dB → −64…−78 dB in the comparison) for about 1.5× the CPU. Renders are offline and
+ * run ~90× real time on Apple Silicon, so the cost doesn't matter here.
+ */
+const QUALITY = { blockMs: 180, intervalMs: 40 }
 
 interface Stretcher {
   module: any
@@ -53,6 +59,9 @@ async function createStretcher(channels: number, sampleRate: number): Promise<St
   const proc = new capturedProcessor({ numberOfOutputs: 1, outputChannelCount: [channels] })
   for (let i = 0; i < 500 && !proc.wasmReady; i++) await new Promise(r => setTimeout(r, 2))
   if (!proc.wasmReady) throw new Error('Signalsmith Stretch WASM failed to start')
+  // Reconfigure from the library default; this also refreshes buffers and latencies
+  proc.config = { ...QUALITY }
+  proc.configure()
   return {
     module: proc.wasmModule,
     bufferLength: proc.bufferLength,
