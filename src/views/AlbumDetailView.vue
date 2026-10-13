@@ -95,7 +95,9 @@
             <p class="text-sm truncate text-white/30">{{ row.title }}</p>
             <p class="text-xs text-white/20">Not downloaded</p>
           </div>
-          <div class="w-48 hidden lg:block" />
+          <div class="w-48 min-w-0 hidden lg:block">
+            <p class="text-xs text-white/20 truncate">{{ album.name }}</p>
+          </div>
           <div class="w-14 text-right shrink-0">
             <span class="text-xs text-white/20 tabular-nums">{{ formatTime(row.duration) }}</span>
           </div>
