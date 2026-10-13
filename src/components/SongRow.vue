@@ -184,6 +184,7 @@
           Go to Artist
         </button>
         <button
+          v-if="!onOwnAlbumPage"
           @click.stop="goToAlbum"
           class="ctx-item w-full px-3.5 py-2 text-left text-sm transition-colors flex items-center gap-2.5"
         >
@@ -548,13 +549,19 @@ function goToArtist() {
   router.push(`/artist/${encodeURIComponent(artistName)}`)
 }
 
+const trackAlbum = computed(() => library.albums.find(a =>
+  a.name === props.track.album && a.artist === (props.track.albumArtist || props.track.artist)
+))
+
+/** Already looking at this track's album, so "Go to Album" would go nowhere */
+const onOwnAlbumPage = computed(() =>
+  !!trackAlbum.value && router.currentRoute.value.path === `/album/${trackAlbum.value.id}`
+)
+
 function goToAlbum() {
   showCtx.value = false
-  const album = library.albums.find(a =>
-    a.name === props.track.album && a.artist === (props.track.albumArtist || props.track.artist)
-  )
-  if (album) {
-    router.push(`/album/${album.id}`)
+  if (trackAlbum.value) {
+    router.push(`/album/${trackAlbum.value.id}`)
   }
 }
 
