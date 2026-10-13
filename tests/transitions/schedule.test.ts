@@ -227,9 +227,9 @@ describe('schedule shapes', () => {
     allPlans(s).forEach(assertValidEvents)
   })
 
-  it('clamps rate to ±3%', () => {
-    expect(clampRate(1.2)).toBe(1.03)
-    expect(clampRate(0.5)).toBe(0.97)
+  it('clamps rate to ±10%', () => {
+    expect(clampRate(1.2)).toBe(1.1)
+    expect(clampRate(0.5)).toBe(0.9)
     expect(clampRate(undefined)).toBe(1)
   })
 

@@ -42,6 +42,7 @@ export function buildTransitionGraph(
   // ── FROM chain ──
   const fromSource = track(ctx.createBufferSource())
   fromSource.buffer = buffers.from
+  applyRatePoints(fromSource.playbackRate, s.fromPlaybackRate)
   let fromTail: AudioNode = fromSource
 
   if (s.bassSwap) {
@@ -88,7 +89,7 @@ export function buildTransitionGraph(
   // ── TO chain ──
   const toSource = track(ctx.createBufferSource())
   toSource.buffer = buffers.to
-  applyRatePoints(toSource.playbackRate, s.toRate)
+  applyRatePoints(toSource.playbackRate, s.toPlaybackRate)
   let toTail: AudioNode = toSource
 
   let toShelf: BiquadFilterNode | null = null

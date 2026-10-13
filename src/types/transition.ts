@@ -13,6 +13,9 @@ export interface FadePoint {
   y: number
 }
 export type TransitionType = 'blend' | 'cut' | 'echo-out'
+export type PitchMode = 'keep' | 'vinyl'
+/** 'to': the incoming song matches the outgoing one; 'from': the reverse; 'meet': both move halfway */
+export type StretchMode = 'to' | 'meet' | 'from'
 
 export interface TransitionEndpoint {
   /** songKey() of the track, so the transition survives file moves */
@@ -54,8 +57,19 @@ export interface Transition {
   filter?: TransitionFilter
   /** Echo-out only: delay time in seconds and feedback (0–0.9) */
   echo?: { delay: number; feedback: number }
-  /** playbackRate for TO during the overlap (clamped to ±3%), ramps back to 1 afterwards */
+  /** TO's speed during the overlap (1 = normal, clamped to ±10%); eases back to 1 over `rampBack` afterwards */
   rateTo?: number
+  /** FROM's speed during the overlap (default 1); reached over `rampBack` seconds before the exit */
+  rateFrom?: number
+  /**
+   * 'keep' time-stretches so pitch stays put; 'vinyl' just plays faster/slower (pitch follows).
+   * Missing means 'vinyl', which is how transitions made before stretching existed sound.
+   */
+  pitch?: PitchMode
+  /** Which song changes speed to match the other (sets rateFrom / rateTo); default 'to' */
+  stretch?: StretchMode
+  /** Seconds to ease tempo back to normal after the overlap (and into it, for FROM). Missing = 2 s, the original behaviour */
+  rampBack?: number
   needsReview: boolean
   createdAt: number
   updatedAt: number

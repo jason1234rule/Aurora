@@ -11,9 +11,12 @@
  * `t0` is the ctx time at which FROM's `exitAt` is heard; TO's `entryAt` is
  * heard at the same instant.
  */
-import type { CurvePreset, FadePoint, Transition } from '@/types/transition'
+import type { CurvePreset, FadePoint, PitchMode, Transition } from '@/types/transition'
 
-export const MAX_RATE_DEVIATION = 0.03
+/** Largest speed change either song gets, as a fraction */
+export const MAX_RATE_DEVIATION = 0.10
+/** Beyond this, time-stretching artifacts may start to be audible */
+export const STRETCH_WARN_DEVIATION = 0.06
 export const MIN_OVERLAP = 0.05
 export const CUT_DECLICK = 0.005
 export const ECHO_DRY_CUT = 0.03
@@ -21,7 +24,13 @@ export const BASS_SHELF_HZ = 200
 export const BASS_CUT_DB = -40
 export const BASS_SWAP_RAMP = 0.02
 export const FILTER_RELEASE = 1.0
+/** Tempo ramp-back for transitions saved before `rampBack` existed */
 export const DEFAULT_RATE_RAMP = 2.0
+/** New transitions ease back over this many bars of TO, or this many seconds without a beat grid */
+export const DEFAULT_RAMP_BACK_BARS = 8
+export const DEFAULT_RAMP_BACK_SECONDS = 8
+/** FROM's ramp into the overlap is capped so the engine can still prepare it in time */
+export const MAX_FROM_RAMP = 16
 export const DEFAULT_ECHO = { delay: 0.375, feedback: 0.5 }
 
 export type ParamEvent =
@@ -45,10 +54,20 @@ export interface TransitionSchedule {
   overlapEnd: number
   /** ctx time after which TO plays alone, at rate 1, unfiltered: safe to hand back */
   settledAt: number
+  /** TO's and FROM's speeds during the overlap */
   rate: number
-  from: { startAt: number; offset: number; stopAt: number }
+  rateFrom: number
+  pitch: PitchMode
+  from: { startAt: number; offset: number; stopAt: number; startPos: number }
   to: { startAt: number; offset: number; startPos: number }
+  /** Tempo envelopes: what each song's position follows (see positionAt) */
   toRate: RatePoint[]
+  fromRate: RatePoint[]
+  /** ctx time FROM starts changing speed (Infinity if it never does) */
+  fromRampStart: number
+  /** What to put on each source's playbackRate: the envelope, or nothing when the buffer is pre-stretched */
+  toPlaybackRate: RatePoint[]
+  fromPlaybackRate: RatePoint[]
   /** Media element fade during the element→buffer swap; empty when there is no swap */
   elementGain: ParamEvent[]
   fromGain: ParamPlan
@@ -72,18 +91,39 @@ export interface ScheduleOptions {
   rateRamp?: number
   /** Used to pick a neutral lowpass frequency (Nyquist) */
   sampleRate?: number
+  /**
+   * Buffers already time-stretched to follow the envelope ('keep' pitch): they start at
+   * their first sample (FROM at from.startAt, TO at t0) and play at rate 1.
+   */
+  prerendered?: { from?: boolean; to?: boolean }
 }
 
 /** The parts of a Transition that affect how it sounds */
 export type TransitionTiming = Pick<Transition,
   'type' | 'exitAt' | 'entryAt' | 'overlap' | 'fadeOut' | 'fadeIn' | 'fadeOutPoints' | 'fadeInPoints'
-  | 'bassSwap' | 'filter' | 'echo' | 'rateTo'>
+  | 'bassSwap' | 'filter' | 'echo' | 'rateTo' | 'rateFrom' | 'pitch' | 'rampBack'>
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
 
 export function clampRate(rate: number | undefined): number {
   if (rate === undefined || !isFinite(rate) || rate <= 0) return 1
   return clamp(rate, 1 - MAX_RATE_DEVIATION, 1 + MAX_RATE_DEVIATION)
+}
+
+/** Missing means 'vinyl': transitions saved before stretching existed must sound the same */
+export function pitchOf(t: Pick<Transition, 'pitch'>): PitchMode {
+  return t.pitch ?? 'vinyl'
+}
+
+export function rampBackOf(t: Pick<Transition, 'rampBack'>): number {
+  const r = t.rampBack
+  return r !== undefined && isFinite(r) ? clamp(r, 0.5, 60) : DEFAULT_RATE_RAMP
+}
+
+/** Seconds FROM takes to reach its overlap speed before the exit (0 when it doesn't change) */
+export function fromRampIn(t: Pick<Transition, 'type' | 'overlap' | 'rateFrom' | 'rampBack'>): number {
+  if (effectiveOverlap(t) === 0 || clampRate(t.rateFrom) === 1) return 0
+  return Math.min(rampBackOf(t), MAX_FROM_RAMP)
 }
 
 /** The overlap actually used: 0 for cuts, and blends shorter than MIN_OVERLAP become cuts. */
@@ -183,28 +223,35 @@ function knots(points: RatePoint[], a: number, b: number): number[] {
   return ts
 }
 
+/** ∫ rate dt from a to b (negative when b < a). The rate is linear between knots, so this is exact. */
+export function envelopeIntegral(points: RatePoint[], a: number, b: number): number {
+  if (b < a) return -envelopeIntegral(points, b, a)
+  const ts = knots(points, a, b)
+  let sum = 0
+  for (let i = 0; i < ts.length - 1; i++) {
+    sum += (rateAt(points, ts[i]) + rateAt(points, ts[i + 1])) / 2 * (ts[i + 1] - ts[i])
+  }
+  return sum
+}
+
 /**
- * File position at `time` of a source started at `startAt` from file position `startPos`
- * whose playbackRate follows `points`. Before `startAt` this extrapolates backwards.
+ * File position at `time` of a source whose position is `startPos` at `startAt` and whose
+ * speed follows `points` (in either direction, so a ramp before `startAt` is integrated too).
  */
 export function positionAt(startAt: number, startPos: number, points: RatePoint[], time: number): number {
-  if (time <= startAt) return startPos - (startAt - time) * rateAt(points, startAt)
-  const ts = knots(points, startAt, time)
-  let pos = startPos
-  for (let i = 0; i < ts.length - 1; i++) {
-    pos += (rateAt(points, ts[i]) + rateAt(points, ts[i + 1])) / 2 * (ts[i + 1] - ts[i])
-  }
-  return pos
+  return startPos + envelopeIntegral(points, startAt, time)
 }
 
 /** Inverse of positionAt: the ctx time at which file position `pos` is heard. */
 export function timeAtPosition(startAt: number, startPos: number, points: RatePoint[], pos: number): number {
   let need = pos - startPos
-  if (need <= 0) return startAt + need / rateAt(points, startAt)
+  if (need === 0) return startAt
+  if (need < 0) return timeBefore(startAt, points, -need)
   const lastKnot = points.length ? Math.max(startAt, points[points.length - 1].time) : startAt
   const ts = knots(points, startAt, lastKnot)
   for (let i = 0; i < ts.length - 1; i++) {
     const a = ts[i], b = ts[i + 1]
+    if (b <= a) continue
     const ra = rateAt(points, a), rb = rateAt(points, b)
     const area = (ra + rb) / 2 * (b - a)
     if (area >= need) {
@@ -216,6 +263,26 @@ export function timeAtPosition(startAt: number, startPos: number, points: RatePo
     need -= area
   }
   return lastKnot + need / rateAt(points, lastKnot)
+}
+
+/** The time before `end` at which `need` seconds of position remain to be played until `end`. */
+function timeBefore(end: number, points: RatePoint[], need: number): number {
+  const firstKnot = points.length ? Math.min(end, points[0].time) : end
+  const ts = knots(points, firstKnot, end)
+  for (let i = ts.length - 1; i > 0; i--) {
+    const a = ts[i - 1], b = ts[i]
+    if (b <= a) continue
+    const ra = rateAt(points, a), rb = rateAt(points, b)
+    const area = (ra + rb) / 2 * (b - a)
+    if (area >= need) {
+      const k = (rb - ra) / (b - a)
+      if (Math.abs(k) < 1e-12) return b - need / rb
+      // rb·y − k·y²/2 = need, with y = b − t
+      return b - (rb - Math.sqrt(Math.max(0, rb * rb - 2 * k * need))) / k
+    }
+    need -= area
+  }
+  return firstKnot - need / rateAt(points, firstKnot)
 }
 
 /** Replace the envelope from `time` on with a ramp from the current rate to 1 over `ramp` seconds. */
@@ -233,17 +300,23 @@ export function buildSchedule(t: TransitionTiming, opts: ScheduleOptions): Trans
   const kind: Transition['type'] = overlap === 0 ? 'cut' : t.type
   const overlapEnd = t0 + overlap
   const rate = kind === 'cut' ? 1 : clampRate(t.rateTo)
-  const rateRamp = opts.rateRamp ?? DEFAULT_RATE_RAMP
+  const rateFrom = kind === 'cut' ? 1 : clampRate(t.rateFrom)
+  const rateRamp = opts.rateRamp ?? rampBackOf(t)
   const nyquist = (opts.sampleRate ?? 44100) / 2
+  const pre = opts.prerendered ?? {}
+
+  // FROM eases into its overlap speed over the ramp before t0, then holds it
+  const rampIn = rateFrom === 1 ? 0 : Math.min(rateRamp, MAX_FROM_RAMP)
+  const fromRate: RatePoint[] = rateFrom === 1 ? [] : [{ time: t0 - rampIn, rate: 1 }, { time: t0, rate: rateFrom }]
 
   // FROM starts leadIn before t0; if that is before the file start, start later at offset 0
   let fromStartAt = t0 - Math.max(0, opts.leadIn)
-  let fromStartPos = t.exitAt - (t0 - fromStartAt)
-  if (fromStartPos < 0) { fromStartAt -= fromStartPos; fromStartPos = 0 }
-  const fromOffset = fromStartPos - opts.fromWindowStart
+  let fromStartPos = positionAt(t0, t.exitAt, fromRate, fromStartAt)
+  if (fromStartPos < 0) { fromStartAt = timeAtPosition(t0, t.exitAt, fromRate, 0); fromStartPos = 0 }
+  const fromOffset = pre.from ? 0 : fromStartPos - opts.fromWindowStart
   if (fromOffset < -1e-9) throw new Error('FROM window starts after the FROM buffer start position')
 
-  const toOffset = t.entryAt - opts.toWindowStart
+  const toOffset = pre.to ? 0 : t.entryAt - opts.toWindowStart
   if (toOffset < -1e-9) throw new Error('TO window starts after entryAt')
 
   // The swap has to finish before anything else is automated on the FROM gain
@@ -342,9 +415,15 @@ export function buildSchedule(t: TransitionTiming, opts: ScheduleOptions): Trans
     overlapEnd,
     settledAt,
     rate,
-    from: { startAt: fromStartAt, offset: fromOffset, stopAt: fromStopAt },
+    rateFrom,
+    pitch: pitchOf(t),
+    from: { startAt: fromStartAt, offset: fromOffset, stopAt: fromStopAt, startPos: fromStartPos },
     to: { startAt: t0, offset: toOffset, startPos: t.entryAt },
     toRate,
+    fromRate,
+    fromRampStart: rampIn > 0 ? t0 - rampIn : Infinity,
+    toPlaybackRate: pre.to ? [] : toRate,
+    fromPlaybackRate: pre.from ? [] : fromRate,
     elementGain,
     fromGain,
     toGain,
@@ -354,8 +433,12 @@ export function buildSchedule(t: TransitionTiming, opts: ScheduleOptions): Trans
   }
 }
 
-export function fromPositionAt(exitAt: number, s: Pick<TransitionSchedule, 't0'>, time: number): number {
-  return exitAt + (time - s.t0)
+export function fromPositionAt(exitAt: number, s: Pick<TransitionSchedule, 't0' | 'fromRate'>, time: number): number {
+  return positionAt(s.t0, exitAt, s.fromRate, time)
+}
+
+export function fromTimeAt(exitAt: number, s: Pick<TransitionSchedule, 't0' | 'fromRate'>, pos: number): number {
+  return timeAtPosition(s.t0, exitAt, s.fromRate, pos)
 }
 
 export function toPositionAt(s: Pick<TransitionSchedule, 'to' | 'toRate'>, time: number): number {

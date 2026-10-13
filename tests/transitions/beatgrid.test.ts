@@ -256,8 +256,8 @@ describe('suggestTransition', () => {
     expect(isDownbeat(from, Math.round(beatIndexAt(from, s.exitAt + s.bassSwap!.at)))).toBe(true)
   })
 
-  it('keeps TO at its own speed with an 8-beat overlap when tempos are more than 3% apart', () => {
-    for (const [fromBpm, toBpm] of [[130, 125], [120, 124]]) {
+  it('keeps TO at its own speed with an 8-beat overlap when tempos are more than 10% apart', () => {
+    for (const [fromBpm, toBpm] of [[130, 115], [100, 115]]) {
       const from = grid(fromBpm, 0.2)
       const s = suggestTransition({ from: { grid: from, duration: 200 }, to: { grid: grid(toBpm, 0.5), duration: 180 } })
       expectValid(s, 200, 180)
@@ -267,8 +267,9 @@ describe('suggestTransition', () => {
     }
   })
 
-  it('rateTo is FROM/TO within ±3%, including the edge', () => {
-    for (const [fromBpm, toBpm] of [[123, 120], [120, 123], [103, 100], [100, 103]]) {
+  it('rateTo is FROM/TO within ±10%, including the edge', () => {
+    // 130 → 120 is the Megan Thee Stallion → Doja Cat example from the stretch handoff
+    for (const [fromBpm, toBpm] of [[123, 120], [120, 123], [130, 120], [110, 100], [100, 110]]) {
       const s = suggestTransition({ from: { grid: grid(fromBpm, 0), duration: 200 }, to: { grid: grid(toBpm, 0), duration: 200 } })
       expect(s.rateTo).toBeCloseTo(fromBpm / toBpm, 9)
       expect(Math.abs(s.rateTo! - 1)).toBeLessThanOrEqual(MAX_RATE_DEVIATION + 1e-12)
