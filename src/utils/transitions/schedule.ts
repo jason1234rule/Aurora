@@ -559,3 +559,102 @@ export function applyRatePoints(param: AudioParam, points: RatePoint[]) {
     else param.linearRampToValueAtTime(p.rate, Math.max(0, p.time))
   }
 }
+
+// ── Starting part-way through (editor preview seeking) ──────────────────────
+
+/** Value of a value curve at fraction `f` (0–1) of its duration, as Web Audio interpolates it */
+function curveValueAt(values: Float32Array, f: number): number {
+  const x = Math.min(1, Math.max(0, f)) * (values.length - 1)
+  const i = Math.min(values.length - 2, Math.floor(x))
+  return i < 0 ? values[0] : values[i] + (values[i + 1] - values[i]) * (x - i)
+}
+
+/**
+ * The same automation, starting at `at`: everything before collapses into the value at `at`,
+ * and a curve in progress is cut to its remaining part. Needed because browsers clamp events
+ * scheduled in the past to "now", which would restart a fade instead of joining it midway.
+ */
+export function cuePlan(plan: ParamPlan, at: number): ParamPlan {
+  let value = plan.initial
+  let prevTime = -Infinity
+  let i = 0
+  const head: ParamEvent[] = []
+  for (; i < plan.events.length; i++) {
+    const e = plan.events[i]
+    if (e.type === 'curve') {
+      const end = e.time + e.duration
+      if (end <= at) { value = e.values[e.values.length - 1]; prevTime = end; continue }
+      if (e.time < at) {
+        const f = (at - e.time) / e.duration
+        const n = Math.max(2, Math.ceil((1 - f) * (e.values.length - 1)) + 1)
+        const values = new Float32Array(n)
+        for (let j = 0; j < n; j++) values[j] = curveValueAt(e.values, f + (1 - f) * j / (n - 1))
+        value = values[0]
+        head.push({ type: 'curve', time: at, duration: end - at, values })
+        i++
+      }
+      break
+    }
+    if (e.time <= at) { value = e.value; prevTime = e.time; continue }
+    // A ramp in progress at `at`: restart it from its current value (same line / curve)
+    if (e.type !== 'set') {
+      const start = Number.isFinite(prevTime) ? prevTime : at
+      const x = e.time > start ? (at - start) / (e.time - start) : 1
+      if (e.type === 'linear') value = value + (e.value - value) * x
+      else if (value > 0 && e.value > 0) value = value * Math.pow(e.value / value, x)
+    }
+    break
+  }
+  if (head.length) {
+    // The curve itself sets the value from `at`
+    return { initial: value, events: [...head, ...plan.events.slice(i)] }
+  }
+  return { initial: value, events: [{ type: 'set', time: at, value }, ...plan.events.slice(i)] }
+}
+
+/** A rate envelope that starts at `at` with the rate it has there */
+export function cueRatePoints(points: RatePoint[], at: number): RatePoint[] {
+  if (!points.length) return points
+  return [{ time: at, rate: rateAt(points, at) }, ...points.filter(p => p.time > at)]
+}
+
+/**
+ * The schedule as heard from ctx time `at` on: sources that would have started earlier start
+ * at `at`, already advanced (following their playbackRate), and all automation joins in where
+ * it would be. Positions (toPositionAt, fromPositionAt) are unchanged.
+ */
+export function cueSchedule(s: TransitionSchedule, at: number): TransitionSchedule {
+  const cueP = (p: ParamPlan) => cuePlan(p, at)
+  let from = s.from
+  if (at >= s.from.stopAt) {
+    from = { ...s.from, startAt: at, stopAt: at, offset: 0 }
+  } else if (s.from.startAt < at) {
+    from = {
+      ...s.from,
+      startAt: at,
+      offset: s.from.offset + envelopeIntegral(s.fromPlaybackRate, s.from.startAt, at),
+      startPos: positionAt(s.from.startAt, s.from.startPos, s.fromRate, at),
+    }
+  }
+  let to = s.to
+  if (s.to.startAt < at) {
+    to = {
+      startAt: at,
+      offset: s.to.offset + envelopeIntegral(s.toPlaybackRate, s.to.startAt, at),
+      startPos: positionAt(s.to.startAt, s.to.startPos, s.toRate, at),
+    }
+  }
+  return {
+    ...s,
+    from,
+    to,
+    toPlaybackRate: cueRatePoints(s.toPlaybackRate, at),
+    fromPlaybackRate: cueRatePoints(s.fromPlaybackRate, at),
+    elementGain: [],
+    fromGain: cueP(s.fromGain),
+    toGain: cueP(s.toGain),
+    bassSwap: s.bassSwap && { ...s.bassSwap, from: cueP(s.bassSwap.from), to: cueP(s.bassSwap.to) },
+    filter: s.filter && { ...s.filter, frequency: cueP(s.filter.frequency) },
+    echo: s.echo && { ...s.echo, send: cueP(s.echo.send), wet: cueP(s.echo.wet) },
+  }
+}

@@ -53,6 +53,8 @@ const emit = defineEmits<{
   (e: 'update', patch: Partial<TransitionTiming>): void
   /** A drag finished (one undo step for the parent, if it wants one) */
   (e: 'commit'): void
+  /** Play from this FROM position (the playhead was dragged, or the ruler clicked) */
+  (e: 'seek', position: number): void
 }>()
 
 const HEIGHT = 300
@@ -309,12 +311,17 @@ function draw() {
     ctx.fillRect(hover.value.x - 6, RULER, 12, HEIGHT - RULER)
   }
 
-  // Preview playhead
-  if (props.playhead !== null) {
-    const xp = xOf(props.playhead)
+  // Preview playhead (or where it's being dragged to), with a grab handle in the ruler
+  const head = scrub.value ?? props.playhead
+  if (head !== null) {
+    const xp = xOf(head)
     if (xp >= 0 && xp <= w) {
       ctx.fillStyle = ink(0.95)
       ctx.fillRect(Math.round(xp), 0, 1.5, HEIGHT)
+      ctx.beginPath()
+      ctx.moveTo(xp - 6, 0); ctx.lineTo(xp + 6.5, 0); ctx.lineTo(xp + 0.75, 9)
+      ctx.closePath()
+      ctx.fill()
     }
   }
 }
@@ -354,16 +361,19 @@ const activeVertex = () => (drag?.fade !== undefined && drag.index !== undefined
   : hover.value?.target === 'vertex' ? { fade: hover.value.fade!, index: hover.value.index! } : selected.value)
 
 // ── Interaction ────────────────────────────────────────────────────────────
-type Target = 'exit' | 'overlapEnd' | 'bass' | 'to' | 'pan' | 'vertex' | 'curve'
+type Target = 'exit' | 'overlapEnd' | 'bass' | 'to' | 'pan' | 'vertex' | 'curve' | 'seek'
 interface Hit { target: Target; fade?: Fade; index?: number }
 const hover = ref<(Hit & { x: number }) | null>(null)
 let drag: (Hit & { startX: number; startTiming: TransitionTiming; startView: [number, number]; moved: boolean }) | null = null
+/** Where the playhead is being dragged to (drawn instead of the real one until release) */
+const scrub = ref<number | null>(null)
 
 const cursor = computed(() => {
   const target = drag?.target ?? hover.value?.target
   if (target === 'vertex') return drag ? 'grabbing' : 'move'
   if (target === 'curve') return 'copy'
   if (target === 'exit' || target === 'overlapEnd' || target === 'bass') return 'ew-resize'
+  if (target === 'seek') return 'col-resize'
   if (target === 'to') return drag ? 'grabbing' : 'grab'
   return drag ? 'grabbing' : 'default'
 })
@@ -382,6 +392,9 @@ function hitTest(x: number, y: number): Hit {
       }
     }
   }
+  // The ruler, or the playhead itself: jump there
+  if (y < RULER) return { target: 'seek' }
+  if (props.playhead !== null && Math.abs(x - xOf(props.playhead)) <= HANDLE_PX) return { target: 'seek' }
   if (t.bassSwap && ov > 0) {
     const xb = xOf(t.exitAt + t.bassSwap.at * rateF.value)
     if (Math.abs(x - xb) <= HANDLE_PX + 2 && Math.abs(y - (TO_TOP - GAP / 2)) <= 12) return { target: 'bass' }
@@ -469,6 +482,7 @@ function onPointerDown(e: PointerEvent) {
   // Curves only react to double-clicks; dragging one behaves like dragging its lane
   if (hit.target === 'curve') hit = { target: hit.fade === 'in' ? 'to' : 'pan' }
   drag = { ...hit, startX: x, startTiming: { ...props.timing }, startView: [viewStart.value, viewEnd.value], moved: false }
+  if (hit.target === 'seek') scrub.value = seekPosition(x)
   canvasRef.value!.setPointerCapture(e.pointerId)
 }
 
@@ -479,6 +493,7 @@ function onPointerMove(e: PointerEvent) {
     return
   }
   const dx = x - drag.startX
+  if (drag.target === 'seek') { scrub.value = seekPosition(x); return }
   if (Math.abs(dx) > 1 || drag.target === 'vertex') drag.moved = true
   if (!drag.moved) return
   const t0 = drag.startTiming
@@ -539,9 +554,16 @@ function onPointerMove(e: PointerEvent) {
   }
 }
 
+/** FROM position under x, kept inside the song */
+function seekPosition(x: number) {
+  return Math.max(0, Math.min(props.fromDuration, tOf(x)))
+}
+
 function onPointerUp(e: PointerEvent) {
   if (!drag) return
   const moved = drag.moved && drag.target !== 'pan' && drag.target !== 'curve'
+  if (drag.target === 'seek' && scrub.value !== null) emit('seek', scrub.value)
+  scrub.value = null
   drag = null
   try { canvasRef.value!.releasePointerCapture(e.pointerId) } catch { /* already released */ }
   if (moved) emit('commit')
@@ -579,7 +601,7 @@ onBeforeUnmount(() => {
 })
 
 watch(
-  () => [props.timing, props.fromPeaks, props.toPeaks, props.fromGrid, props.toGrid, props.playhead, viewStart.value, viewEnd.value, width.value, hover.value, selected.value],
+  () => [props.timing, props.fromPeaks, props.toPeaks, props.fromGrid, props.toGrid, props.playhead, scrub.value, viewStart.value, viewEnd.value, width.value, hover.value, selected.value],
   scheduleDraw,
   { deep: true },
 )

@@ -24,12 +24,13 @@
 import type { Transition } from '@/types/transition'
 import {
   buildSchedule, toPositionAt, toTimeAt, fromPositionAt, rampRateToUnity, applyParamEvents,
-  planValueAt, rateAt, fromRampIn, equalPowerEvents, type TransitionSchedule, type TransitionTiming,
+  cueSchedule, effectiveOverlap, planValueAt, rateAt, fromRampIn, equalPowerEvents, type TransitionSchedule, type TransitionTiming,
 } from './schedule'
 import { buildTransitionGraph, type TransitionGraph } from './graph'
 import { findAlignment, mixToMono } from './align'
 import { stretchPlan, renderPlan, type StretchRenderer } from './stretch/plan'
 import { stretchInWorker } from './stretch/client'
+import type { PreviewSpeedMix } from './previewSpeed'
 
 /** Start decoding this long before exitAt */
 export const PREP_WINDOW = 30
@@ -84,6 +85,10 @@ export interface PreviewOptions {
   onEnded?: () => void
   /** Pre-stretched sections from previewStretchPlan (pitch 'keep'); missing ones play resampled */
   stretched?: { from?: AudioBuffer; to?: AudioBuffer }
+  /** Start this many seconds after the exit (negative = before it). Default: −preRoll */
+  cue?: number
+  /** Play these stems (renderPreviewSpeed) instead, at their own speed */
+  speedMix?: PreviewSpeedMix
 }
 
 export interface PreviewHandle {
@@ -92,6 +97,8 @@ export interface PreviewHandle {
   startAt: number
   endAt: number
   schedule: TransitionSchedule
+  /** Where in the transition ctx time `time` is: seconds after the exit, at normal speed */
+  heardAt(time: number): number
   setSolo(solo: PreviewSolo): void
   stop(): void
 }
@@ -161,7 +168,7 @@ export function prepWindowFor(t: Transition): number {
 }
 
 /** Preview pre-roll actually used (it can't start before the file does) */
-function previewPreRoll(t: TransitionTiming, preRoll: number): number {
+export function previewPreRoll(t: TransitionTiming, preRoll: number): number {
   return Math.max(0, Math.min(preRoll, t.exitAt))
 }
 
@@ -584,15 +591,20 @@ export class TransitionEngine {
   preview(buffers: { from: AudioBuffer; to: AudioBuffer }, t: TransitionTiming, opts: PreviewOptions): PreviewHandle {
     this.stopPreview()
     const { ctx } = this.host
-    const preRoll = previewPreRoll(t, opts.preRoll)
+    const mix = opts.speedMix
+    const preRoll = mix?.preRoll ?? previewPreRoll(t, opts.preRoll)
     const startAt = ctx.currentTime + 0.08
-    const t0 = startAt + preRoll
     const st = opts.stretched ?? {}
+    const speed = mix?.speed ?? 1
+    // Where to start, in seconds after the exit at normal speed
+    const last = Math.min((mix?.duration ?? Infinity) - preRoll, effectiveOverlap(t) + opts.postRoll) - 0.3
+    const cue = Math.max(-preRoll, Math.min(opts.cue ?? -preRoll, last))
+    const t0 = startAt - cue / speed
     const s = buildSchedule(t, {
-      t0, leadIn: preRoll, fromWindowStart: 0, toWindowStart: 0, sampleRate: ctx.sampleRate,
+      t0: startAt - cue, leadIn: preRoll, fromWindowStart: 0, toWindowStart: 0, sampleRate: ctx.sampleRate,
       prerendered: { from: !!st.from, to: !!st.to },
     })
-    const endAt = s.overlapEnd + opts.postRoll
+    const endAt = mix ? startAt + (mix.duration - preRoll - cue) / speed : s.overlapEnd + opts.postRoll
 
     const master = ctx.createGain()
     master.connect(this.out)
@@ -606,24 +618,49 @@ export class TransitionEngine {
     }
     fromBus.gain.value = opts.solo === 'to' ? 0 : 1
     toBus.gain.value = opts.solo === 'from' ? 0 : 1
+    // Joining mid-song: a quick fade in instead of a click
+    if (cue > -preRoll) {
+      master.gain.setValueAtTime(0, startAt)
+      master.gain.linearRampToValueAtTime(1, startAt + 0.01)
+    }
     // Fade the tail so the preview doesn't stop mid-note
-    master.gain.setValueAtTime(1, Math.max(startAt, endAt - 0.4))
+    master.gain.setValueAtTime(1, Math.max(startAt + 0.01, endAt - 0.4))
     master.gain.linearRampToValueAtTime(0, endAt)
 
-    const graph = buildTransitionGraph(ctx, { from: st.from ?? buffers.from, to: st.to ?? buffers.to }, s, fromBus, toBus)
-    graph.toSource.stop(endAt + 0.02)
+    let disposeSources: (when: number) => void
+    if (mix) {
+      const sources = [mix.from, mix.to].map((buffer, i) => {
+        const src = ctx.createBufferSource()
+        src.buffer = buffer
+        src.connect(i === 0 ? fromBus : toBus)
+        src.start(startAt, (preRoll + cue) / speed)
+        src.stop(endAt + 0.02)
+        return src
+      })
+      disposeSources = (when) => {
+        for (const src of sources) { try { src.stop(when) } catch { /* already stopped */ } }
+        setTimeout(() => { for (const src of sources) src.disconnect() }, Math.max(0, (when - ctx.currentTime) * 1000) + 50)
+      }
+    } else {
+      // Starting part-way: everything before `startAt` is collapsed into its state at `startAt`
+      const graph = buildTransitionGraph(ctx, { from: st.from ?? buffers.from, to: st.to ?? buffers.to },
+        cue > -preRoll ? cueSchedule(s, startAt) : s, fromBus, toBus)
+      graph.toSource.stop(endAt + 0.02)
+      disposeSources = (when) => graph.dispose(when)
+    }
     let stopped = false
     const cleanup = () => {
       if (stopped) return
       stopped = true
       clearTimeout(endTimer)
-      graph.dispose(ctx.currentTime + 0.04)
+      disposeSources(ctx.currentTime + 0.04)
       setTimeout(() => { for (const n of [master, fromBus, toBus]) n.disconnect() }, 100)
       if (this.previewHandle === handle) this.previewHandle = null
     }
     const endTimer = setTimeout(() => { cleanup(); opts.onEnded?.() }, (endAt - ctx.currentTime) * 1000 + 30)
     const handle: PreviewHandle = {
       t0, startAt, endAt, schedule: s,
+      heardAt: (time) => cue + (time - startAt) * speed,
       setSolo: (solo) => { if (!stopped) applySolo(solo, ctx.currentTime + 0.01) },
       stop: () => {
         if (stopped) return

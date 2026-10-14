@@ -512,3 +512,30 @@ phase 3 `771a31b` (editor), then these notes.
 - The source slice sent to the worker is about the size of the output and is freed after
   rendering.
 
+
+---
+
+## Later editor additions (preview only, the transition itself is unchanged)
+
+- **Snap to beats** is filled with the accent colour when it's on, so it reads as a switch.
+- **Jump around the preview:** click the time ruler, or drag the white playhead line.
+  - `cueSchedule()` starts the same schedule part-way through: sources start already
+    advanced, and fades, filter and bass swap join in where they'd be.
+  - Browsers clamp automation scheduled in the past to "now", which would restart a fade,
+    so nothing is scheduled before the jump point.
+  - Fades, bass swap and filter match the full preview to ~3e-5.
+  - A resampled (Vinyl) song that is changing speed lands within ~1 sample (0.02 ms).
+    Web Audio updates `playbackRate` once per 128 frames, so the full preview drifts that
+    far from the exact position the jump starts from.
+  - Jumping into an echo-out's tail skips the echoes from before the jump.
+- **Preview speed** (0.5× – 1.5×, pitch kept):
+  - the preview is rendered offline as two stereo stems (FROM, TO), so solo still works;
+  - the stems are stretched in the worker;
+  - every beat lands within 0.2 ms in the transition's own time;
+  - preparing takes ~2.4 s for a 23 s preview at 0.5× in this container (faster on the Mac);
+  - the last two renders are cached.
+  - New: `previewSpeed.ts`.
+- **Test-only note.** node-web-audio-api segfaulted when the jump-in renders and the speed
+  renders ran in one test process. They're in separate files now (`preview.test.ts`,
+  `preview-speed.test.ts`). In-app code is unaffected: the same renders run fine in plain
+  Node and in Chromium.

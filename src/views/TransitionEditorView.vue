@@ -96,6 +96,9 @@
         <label class="tx-chip" :class="loop ? 'tx-chip-on' : ''">
           <input type="checkbox" v-model="loop" class="hidden" /> Loop
         </label>
+        <select v-model.number="speed" class="tx-select" title="How fast this preview plays, keeping the pitch. Only for listening: the transition itself doesn't change.">
+          <option v-for="o in speedOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+        </select>
         <div class="flex rounded-lg overflow-hidden border border-white/[0.08]">
           <button
             v-for="opt in soloOptions"
@@ -117,7 +120,7 @@
           <span class="w-3 h-3 border border-accent/30 border-t-accent rounded-full animate-spin" />
           Preparing the speed change…
         </span>
-        <label class="tx-chip" :class="snap ? 'tx-chip-on' : ''" title="Snap handles to beats (hold Alt while dragging to override)">
+        <label class="tx-chip" :class="snap ? 'tx-chip-solid' : ''" title="When on, dragged lines and points jump to the nearest beat (hold Alt / Option to drag freely)">
           <input type="checkbox" v-model="snap" class="hidden" /> Snap to beats
         </label>
         <button class="tx-icon-btn" title="Zoom out" @click="timelineRef?.zoom(1.5)">−</button>
@@ -139,10 +142,12 @@
         :snap="snap"
         :playhead="playhead"
         @update="update"
+        @seek="seekPreview"
       />
       <p class="text-[11px] text-white/30 mt-2">
         Drag the lower waveform to line up the beats · drag the solid line to move where the blend starts and the dashed line to
-        change its length · double-click a fade line to add a point · scroll to zoom · Space plays
+        change its length · double-click a fade line to add a point · click the time ruler or drag the white line to jump ·
+        scroll to zoom · Space plays
       </p>
 
       <!-- Basics + fades -->
@@ -447,9 +452,10 @@ import { stretchInWorker } from '@/utils/transitions/stretch/client'
 import { PeakPyramid } from '@/utils/transitions/peaks'
 import { getBeatGrid } from '@/utils/transitions/analysis'
 import { suggestTransition } from '@/utils/transitions/suggest'
-import { moveExit, slideTo, fromSpeed } from '@/utils/transitions/timeline'
+import { moveExit, slideTo, fromSpeed, mixMapping } from '@/utils/transitions/timeline'
+import { renderPreviewSpeed, type PreviewSpeedMix } from '@/utils/transitions/previewSpeed'
 import {
-  clampRate, presetVertices, rateRatio, splitRates, autoStretchMode, pitchOf, rampBackOf, fromPositionAt,
+  clampRate, presetVertices, rateRatio, splitRates, autoStretchMode, pitchOf, rampBackOf, fromPositionAt, fromTimeAt,
   MAX_RATE_DEVIATION, STRETCH_WARN_DEVIATION, DEFAULT_RAMP_BACK_BARS, MAX_FROM_RAMP, DEFAULT_ECHO, type TransitionTiming,
 } from '@/utils/transitions/schedule'
 import type { Transition, TransitionEndpoint, BeatGrid, CurvePreset, TransitionType, PitchMode, StretchMode } from '@/types/transition'
@@ -636,6 +642,7 @@ async function load() {
   // Stretched previews belong to the songs that were open
   stretchCache.clear()
   stretchDone.clear()
+  speedCache.clear()
   status.value = 'loading'
   fromGrid.value = toGrid.value = null
   fromBuf.value = toBuf.value = fromPeaks.value = toPeaks.value = null
@@ -1027,15 +1034,24 @@ watch(stretchKey, (key) => {
   stretchTimer = setTimeout(() => { stretchedFor(previewPlan())?.catch(() => {}) }, 400)
 })
 
-async function startPreview() {
+/** Play the preview, from `cue` seconds after the exit if given (else from the pre-roll) */
+async function startPreview(cue?: number) {
   const d = draft.value
   if (!d || !fromBuf.value || !toBuf.value) return
   stopPreview()
   const token = ++previewToken
   const t = timingOf(d)
   const exitAt = d.exitAt
+  const buffers = { from: fromBuf.value, to: toBuf.value }
+  pendingCue = cue
+  // While the audio is prepared, keep the playhead where playback will start
+  if (cue !== undefined) {
+    const m = mixMapping(t).schedule
+    playhead.value = fromPositionAt(exitAt, m, m.t0 + cue)
+  }
   let stretched: Stretched | undefined
-  const pending = stretchedFor(previewPlan())
+  const plan = previewPlan()
+  const pending = stretchedFor(plan)
   if (pending) {
     preparingPreview.value = true
     try {
@@ -1045,13 +1061,26 @@ async function startPreview() {
       toast.error('Couldn\'t prepare the pitch-kept speed change, so this preview changes pitch like vinyl.')
     }
     if (token !== previewToken) return
-    preparingPreview.value = false
   }
-  const handle = player.previewTransition({ from: fromBuf.value, to: toBuf.value }, t, {
+  let speedMix: PreviewSpeedMix | undefined
+  if (speed.value !== 1) {
+    preparingPreview.value = true
+    try {
+      speedMix = await speedMixFor(t, buffers, stretched, plan)
+    } catch (err) {
+      console.warn('[Transitions] Preview speed failed:', err)
+      toast.error('Couldn\'t prepare that playback speed, so this preview plays at normal speed.')
+    }
+    if (token !== previewToken) return
+  }
+  preparingPreview.value = false
+  const handle = player.previewTransition(buffers, t, {
     preRoll: preRoll.value,
     postRoll: POST_ROLL,
     solo: solo.value,
     stretched,
+    cue,
+    speedMix,
     onEnded: () => {
       if (preview.value !== handle) return
       preview.value = null
@@ -1067,7 +1096,7 @@ async function startPreview() {
     // Something else (e.g. pressing play in the player bar) stopped the preview
     if (!player.isTransitionPreviewing()) { preview.value = null; playhead.value = null; return }
     // Where the outgoing song is (it may be changing speed): the timeline's x-axis
-    playhead.value = fromPositionAt(exitAt, handle.schedule, ctx.currentTime)
+    playhead.value = fromPositionAt(exitAt, handle.schedule, handle.schedule.t0 + handle.heardAt(ctx.currentTime))
     rafId = requestAnimationFrame(tick)
   }
   rafId = requestAnimationFrame(tick)
@@ -1082,6 +1111,50 @@ function stopPreview() {
   preview.value = null
   playhead.value = null
 }
+
+/** Play from FROM position `x` (the playhead was dragged or the ruler clicked) */
+function seekPreview(x: number) {
+  const d = draft.value
+  if (!d) return
+  const m = mixMapping(timingOf(d)).schedule
+  startPreview(fromTimeAt(d.exitAt, m, x) - m.t0)
+}
+
+/** Seconds after the exit the preview is at now (or will start from, while it prepares) */
+function previewPosition(): number | undefined {
+  const ctx = player.getAudioContext()
+  return preview.value && ctx ? preview.value.heardAt(ctx.currentTime) : pendingCue
+}
+
+// ── Preview speed (listening only) ─────────────────────────────────────────
+const speed = ref(1)
+const speedOptions = [
+  { value: 0.5, label: '0.5× speed' },
+  { value: 0.75, label: '0.75× speed' },
+  { value: 1, label: 'Normal speed' },
+  { value: 1.25, label: '1.25× speed' },
+  { value: 1.5, label: '1.5× speed' },
+]
+let pendingCue: number | undefined
+const speedCache = new Map<string, Promise<PreviewSpeedMix>>()
+
+function speedMixFor(t: TransitionTiming, buffers: { from: AudioBuffer; to: AudioBuffer }, stretched: Stretched | undefined, plan: StretchPlan) {
+  const key = JSON.stringify([t, preRoll.value, POST_ROLL, speed.value, plan.from || plan.to ? planKey(plan) : '', !!stretched])
+  let p = speedCache.get(key)
+  if (!p) {
+    p = renderPreviewSpeed(buffers, stretched, t, { preRoll: preRoll.value, postRoll: POST_ROLL, speed: speed.value }, stretchInWorker)
+    speedCache.set(key, p)
+    p.catch(() => speedCache.delete(key))
+    // Each one holds the whole preview as four channels: keep only the last two
+    while (speedCache.size > 2) speedCache.delete(speedCache.keys().next().value!)
+  }
+  return p
+}
+
+// Changing the speed mid-preview carries on from the same spot
+watch(speed, () => {
+  if (previewing.value) startPreview(previewPosition())
+})
 
 function setSolo(value: PreviewSolo) {
   solo.value = value
@@ -1112,6 +1185,7 @@ onBeforeUnmount(() => {
   stopPreview()
   clearTimeout(stretchTimer)
   stretchCache.clear()
+  speedCache.clear()
   fallbackCtx?.close().catch(() => {})
 })
 
@@ -1208,6 +1282,10 @@ onBeforeRouteUpdate(confirmDiscard)
 .tx-chip:hover:not(:disabled) { color: rgb(var(--app-text) / 0.9); background: rgb(var(--app-text) / 0.09); }
 .tx-chip:disabled { opacity: 0.35; cursor: default; }
 .tx-chip-on { color: rgb(var(--accent)); background: rgb(var(--accent) / 0.15); }
+/* An on/off switch that's on: unmistakably filled */
+.tx-chip.tx-chip-solid,
+.tx-chip.tx-chip-solid:hover:not(:disabled) { color: #fff; background: rgb(var(--accent)); }
+.tx-chip.tx-chip-solid:hover:not(:disabled) { filter: brightness(1.1); }
 .tx-icon-btn {
   width: 1.9rem;
   height: 1.9rem;

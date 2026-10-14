@@ -124,9 +124,11 @@ export function buildTransitionGraph(
   toTail.connect(toDirect)
   toDirect.connect(toOut)
 
-  // Browsers reject negative start times; the schedule never produces them for live use
-  fromSource.start(Math.max(0, s.from.startAt), Math.max(0, s.from.offset))
-  fromSource.stop(Math.max(0, s.from.stopAt))
+  // Browsers reject negative start times; the schedule never produces them for live use.
+  // A preview started after FROM has ended (cueSchedule) has nothing of FROM left: start it at its end.
+  const fromDone = s.from.stopAt <= s.from.startAt
+  fromSource.start(Math.max(0, s.from.startAt), fromDone ? buffers.from.duration : Math.max(0, s.from.offset))
+  fromSource.stop(Math.max(0, fromDone ? s.from.startAt : s.from.stopAt))
   toSource.start(Math.max(0, s.to.startAt), Math.max(0, s.to.offset))
 
   let disposed = false
