@@ -570,27 +570,28 @@ function curveValueAt(values: Float32Array, f: number): number {
 }
 
 /**
- * The same automation, starting at `at`: everything before collapses into the value at `at`,
- * and a curve in progress is cut to its remaining part. Needed because browsers clamp events
- * scheduled in the past to "now", which would restart a fade instead of joining it midway.
+ * The same automation, starting at `at`: everything before collapses into the value at `at`.
+ * Needed because browsers clamp events scheduled in the past to "now", which would restart a
+ * fade instead of joining it midway. A value curve in progress continues as straight ramps
+ * between its remaining points, which is exactly how Web Audio interpolates a curve.
  */
 export function cuePlan(plan: ParamPlan, at: number): ParamPlan {
   let value = plan.initial
   let prevTime = -Infinity
   let i = 0
-  const head: ParamEvent[] = []
+  const rest: ParamEvent[] = []
   for (; i < plan.events.length; i++) {
     const e = plan.events[i]
     if (e.type === 'curve') {
       const end = e.time + e.duration
       if (end <= at) { value = e.values[e.values.length - 1]; prevTime = end; continue }
       if (e.time < at) {
-        const f = (at - e.time) / e.duration
-        const n = Math.max(2, Math.ceil((1 - f) * (e.values.length - 1)) + 1)
-        const values = new Float32Array(n)
-        for (let j = 0; j < n; j++) values[j] = curveValueAt(e.values, f + (1 - f) * j / (n - 1))
-        value = values[0]
-        head.push({ type: 'curve', time: at, duration: end - at, values })
+        const n = e.values.length
+        const step = e.duration / (n - 1)
+        value = curveValueAt(e.values, (at - e.time) / e.duration)
+        for (let j = Math.floor((at - e.time) / step) + 1; j < n; j++) {
+          rest.push({ type: 'linear', time: e.time + j * step, value: e.values[j] })
+        }
         i++
       }
       break
@@ -605,11 +606,7 @@ export function cuePlan(plan: ParamPlan, at: number): ParamPlan {
     }
     break
   }
-  if (head.length) {
-    // The curve itself sets the value from `at`
-    return { initial: value, events: [...head, ...plan.events.slice(i)] }
-  }
-  return { initial: value, events: [{ type: 'set', time: at, value }, ...plan.events.slice(i)] }
+  return { initial: value, events: [{ type: 'set', time: at, value }, ...rest, ...plan.events.slice(i)] }
 }
 
 /** A rate envelope that starts at `at` with the rate it has there */

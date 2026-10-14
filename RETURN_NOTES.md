@@ -523,10 +523,12 @@ phase 3 `771a31b` (editor), then these notes.
     advanced, and fades, filter and bass swap join in where they'd be.
   - Browsers clamp automation scheduled in the past to "now", which would restart a fade,
     so nothing is scheduled before the jump point.
-  - Fades, bass swap and filter match the full preview to ~3e-5.
-  - A resampled (Vinyl) song that is changing speed lands within ~1 sample (0.02 ms).
-    Web Audio updates `playbackRate` once per 128 frames, so the full preview drifts that
-    far from the exact position the jump starts from.
+  - A fade curve in progress continues as straight ramps between its remaining points,
+    which is exactly how Web Audio interpolates a curve.
+  - Tested exactly on the schedule: every value and every source position after the jump
+    matches the full preview to 1e-6.
+  - A resampled (Vinyl) song that is changing speed can land ~1 sample (0.02 ms) from the full
+    preview, because Web Audio updates `playbackRate` once per 128 frames.
   - Jumping into an echo-out's tail skips the echoes from before the jump.
 - **Preview speed** (0.5× – 1.5×, pitch kept):
   - the preview is rendered offline as two stereo stems (FROM, TO), so solo still works;
@@ -535,7 +537,10 @@ phase 3 `771a31b` (editor), then these notes.
   - preparing takes ~2.4 s for a 23 s preview at 0.5× in this container (faster on the Mac);
   - the last two renders are cached.
   - New: `previewSpeed.ts`.
-- **Test-only note.** node-web-audio-api segfaulted when the jump-in renders and the speed
-  renders ran in one test process. They're in separate files now (`preview.test.ts`,
-  `preview-speed.test.ts`). In-app code is unaffected: the same renders run fine in plain
-  Node and in Chromium.
+- **Test-only note.** node-web-audio-api (the offline renderer used by the tests)
+  occasionally segfaulted under parallel test load once the jump-in tests rendered audio.
+  - It was about 1 run in 8, and the crashing file varied.
+  - After a crash, vitest leaves orphaned workers spinning; kill them before re-running.
+  - The jump-in tests now check the schedule exactly instead of rendering: 0 crashes in
+    10 full runs.
+  - App code is unaffected: the same renders run fine in plain Node and in Chromium.
