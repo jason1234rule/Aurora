@@ -27,6 +27,18 @@ describe('cover colour', () => {
     const c = dominantColor(image(32, (x) => (x < 18 ? [8, 8, 12] : [30, 60, 220])))
     expect(chroma(c)).toBeGreaterThan(30)
   })
+  it('treats a mostly-shadow cover as coloured when its colour is split across shades', () => {
+    // 45% near-black, the rest four slightly different warm browns (eternal sunshine-like)
+    const browns: [number, number, number][] = [[90, 60, 30], [140, 100, 55], [190, 150, 95], [120, 80, 35]]
+    const c = dominantColor(image(32, (x, y) => (x < 14 ? [6, 5, 4] : browns[(x + y) % 4])))
+    expect(chroma(c)).toBeGreaterThanOrEqual(8)
+    expect(hue(c)).toBeGreaterThan(40); expect(hue(c)).toBeLessThan(90)
+  })
+  it('keeps a grey cover with only a faint tint grey', () => {
+    // 85% light grey, 15% pale teal (Positions-like)
+    const c = dominantColor(image(32, (x, y) => (y < 5 ? [120, 170, 160] : [215, 215, 212])))
+    expect(chroma(c)).toBeLessThan(8)
+  })
   it('calls black & white covers grey', () => {
     const c = dominantColor(image(32, (x, y) => { const v = (x * 8 + y) % 256; return [v, v, v] }))
     expect(chroma(c)).toBeLessThan(8)

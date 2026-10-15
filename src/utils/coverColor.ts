@@ -28,6 +28,15 @@ const COLOUR_BOOST_BASE = 0.25
 const COLOUR_BOOST_CAP = 30
 /** Below this chroma a cover counts as grey */
 const GREY_CHROMA = 8
+/**
+ * A "grey" winner is overruled when at least this share of the cover is clearly
+ * coloured (chroma ≥ COLOURED_CHROMA). Measured: eternal sunshine 56%, Positions' teal
+ * tint 11%, black & white covers 0%.
+ */
+const COLOURED_CHROMA = 12
+const MIN_COLOURED_SHARE = 0.3
+/** Coloured clusters within this many degrees of hue count as one colour */
+const SAME_HUE_DEGREES = 30
 
 export const chroma = (c: CoverColor) => Math.hypot(c.a, c.b)
 export const hue = (c: CoverColor) => (Math.atan2(c.b, c.a) * 180 / Math.PI + 360) % 360
@@ -73,7 +82,22 @@ export function dominantColor(rgba: Uint8ClampedArray): CoverColor {
     const score = counts[k] * (COLOUR_BOOST_BASE + Math.min(chroma(c), COLOUR_BOOST_CAP) / COLOUR_BOOST_CAP)
     if (score > bestScore) { bestScore = score; best = k }
   })
-  return centres[best]
+  if (chroma(centres[best]) >= GREY_CHROMA) return centres[best]
+
+  // A dark or pale cluster won, but the cover may still be largely coloured, just split
+  // across several shades (eternal sunshine: 56% warm browns in four clusters, each
+  // smaller than its shadows). If enough of it is coloured, use those shades together.
+  const coloured = centres.map((c, k) => ({ c, n: counts[k] })).filter(x => x.n && chroma(x.c) >= COLOURED_CHROMA)
+  const share = coloured.reduce((s, x) => s + x.n, 0) / pts.length
+  if (share < MIN_COLOURED_SHARE) return centres[best]
+  const anchor = coloured.reduce((m, x) => (x.n * chroma(x.c) > m.n * chroma(m.c) ? x : m))
+  const near = coloured.filter(x => Math.abs(((hue(x.c) - hue(anchor.c) + 540) % 360) - 180) <= SAME_HUE_DEGREES)
+  const total = near.reduce((s, x) => s + x.n, 0)
+  return {
+    l: near.reduce((s, x) => s + x.c.l * x.n, 0) / total,
+    a: near.reduce((s, x) => s + x.c.a * x.n, 0) / total,
+    b: near.reduce((s, x) => s + x.c.b * x.n, 0) / total,
+  }
 }
 
 /**
@@ -127,7 +151,7 @@ export function colorOrder<T>(items: T[], colorOf: (item: T) => CoverColor | und
 }
 
 // ── Cache ────────────────────────────────────────────────────────────────────
-const STORAGE_KEY = 'aurora-cover-colors-v3'
+const STORAGE_KEY = 'aurora-cover-colors-v4'
 const cache = new Map<string, CoverColor>()
 let loaded = false
 
