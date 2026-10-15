@@ -968,6 +968,8 @@ function audition() {
   const d = existing.value
   if (!d || !fromTrack.value || !toTrack.value) return
   stopPreview()
+  // This plays through the real player, so hand its controls back
+  player.setControlsLock(null)
   player.auditionTransition(fromTrack.value, toTrack.value, d.exitAt - 12)
 }
 
@@ -1039,6 +1041,7 @@ async function startPreview(cue?: number) {
   const d = draft.value
   if (!d || !fromBuf.value || !toBuf.value) return
   stopPreview()
+  lockPlayer()
   const token = ++previewToken
   const t = timingOf(d)
   const exitAt = d.exitAt
@@ -1193,8 +1196,18 @@ function onKeydown(e: KeyboardEvent) {
   e.stopPropagation()
 }
 
-onMounted(() => document.addEventListener('keydown', onKeydown, { capture: true }))
+// The player bar, media keys and remotes would fight the preview: lock them while the
+// editor is open. Their play/pause toggles the preview instead.
+function lockPlayer() {
+  player.setControlsLock(() => { previewing.value ? pausePreview() : startPreview(pausedCue) })
+}
+
+onMounted(() => {
+  document.addEventListener('keydown', onKeydown, { capture: true })
+  lockPlayer()
+})
 onBeforeUnmount(() => {
+  player.setControlsLock(null)
   document.removeEventListener('keydown', onKeydown, { capture: true })
   stopPreview()
   clearTimeout(stretchTimer)

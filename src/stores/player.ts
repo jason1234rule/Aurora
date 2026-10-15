@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, computed, watch } from 'vue'
+import { ref, shallowRef, computed, watch } from 'vue'
 import { pluginBus } from '@/plugins/eventBus'
 import { useTransitionsStore } from './transitions'
 import {
@@ -696,23 +696,38 @@ export const usePlayerStore = defineStore('player', () => {
     if (typeof s.autoMeetPercent === 'number' && isFinite(s.autoMeetPercent)) autoMeetPercent.value = s.autoMeetPercent
   })
 
+  // ── Controls lock (the transition editor owns playback) ─────────────────
+  /** While set, the player bar is disabled and play/pause from media keys, MPRIS or
+   *  remotes goes to this handler instead; other transport commands are ignored. */
+  const lockedToggle = shallowRef<(() => void) | null>(null)
+  const controlsLocked = computed(() => !!lockedToggle.value)
+  function setControlsLock(onToggle: (() => void) | null) {
+    lockedToggle.value = onToggle
+    if (onToggle && isPlaying.value) pause()
+  }
+  /** Run `fn` unless the controls are locked; play/pause commands toggle the locker instead */
+  function unlessLocked(fn: () => void, isToggle = false) {
+    if (!lockedToggle.value) return fn()
+    if (isToggle) lockedToggle.value()
+  }
+
   // ── MediaSession action handlers (MPRIS integration) ─────────────────────
   if ('mediaSession' in navigator) {
-    navigator.mediaSession.setActionHandler('play', () => play())
-    navigator.mediaSession.setActionHandler('pause', () => pause())
-    navigator.mediaSession.setActionHandler('previoustrack', () => previous())
-    navigator.mediaSession.setActionHandler('nexttrack', () => next())
-    navigator.mediaSession.setActionHandler('stop', () => { pause(); activeAudio().currentTime = 0 })
-    navigator.mediaSession.setActionHandler('seekto', (details) => {
+    navigator.mediaSession.setActionHandler('play', () => unlessLocked(() => play(), true))
+    navigator.mediaSession.setActionHandler('pause', () => unlessLocked(() => pause(), true))
+    navigator.mediaSession.setActionHandler('previoustrack', () => unlessLocked(() => previous()))
+    navigator.mediaSession.setActionHandler('nexttrack', () => unlessLocked(() => next()))
+    navigator.mediaSession.setActionHandler('stop', () => unlessLocked(() => { pause(); activeAudio().currentTime = 0 }))
+    navigator.mediaSession.setActionHandler('seekto', (details) => unlessLocked(() => {
       if (details.seekTime != null) seek(details.seekTime)
-    })
+    }))
     // currentTime (not the element's) so these stay right while a transition owns the element
-    navigator.mediaSession.setActionHandler('seekbackward', (details) => {
+    navigator.mediaSession.setActionHandler('seekbackward', (details) => unlessLocked(() => {
       seek(Math.max(0, currentTime.value - (details.seekOffset || 10)))
-    })
-    navigator.mediaSession.setActionHandler('seekforward', (details) => {
+    }))
+    navigator.mediaSession.setActionHandler('seekforward', (details) => unlessLocked(() => {
       seek(Math.min(duration.value, currentTime.value + (details.seekOffset || 10)))
-    })
+    }))
   }
 
   // Keep MediaSession playback state in sync
@@ -759,6 +774,11 @@ export const usePlayerStore = defineStore('player', () => {
 
   // Listen for MPRIS commands from the main process
   window.api.onMprisCommand((command: string, data?: any) => {
+    const transport = ['play', 'pause', 'playPause', 'togglePlay', 'next', 'previous', 'stop', 'seek', 'seekAbsolute', 'playFromQueue']
+    if (lockedToggle.value && transport.includes(command)) {
+      if (command === 'play' || command === 'pause' || command === 'playPause' || command === 'togglePlay') lockedToggle.value()
+      return
+    }
     switch (command) {
       case 'play': play(); break
       case 'pause': pause(); break
@@ -1931,6 +1951,11 @@ export const usePlayerStore = defineStore('player', () => {
 
   // Handle commands from remote clients
   window.api.onRemoteCommand((command: string, data?: any) => {
+    const transport = ['play', 'pause', 'playPause', 'togglePlay', 'next', 'previous', 'stop', 'seek', 'seekAbsolute', 'playFromQueue']
+    if (lockedToggle.value && transport.includes(command)) {
+      if (command === 'play' || command === 'pause' || command === 'playPause' || command === 'togglePlay') lockedToggle.value()
+      return
+    }
     switch (command) {
       case 'play': play(); break
       case 'pause': pause(); break
@@ -2099,6 +2124,8 @@ export const usePlayerStore = defineStore('player', () => {
     setAutoMeet,
     isTransitionPreviewing,
     getAudioContext,
+    controlsLocked,
+    setControlsLock,
     auditionTransition,
     // Scrobbling
     setScrobblingEnabled,

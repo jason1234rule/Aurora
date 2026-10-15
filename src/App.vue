@@ -30,7 +30,12 @@
     </div>
 
     <!-- Bottom player bar -->
-    <PlayerBar v-if="player.currentTrack && !isFullscreen && !isMini" />
+    <PlayerBar
+      v-if="player.currentTrack && !isFullscreen && !isMini"
+      :inert="player.controlsLocked || undefined"
+      :class="player.controlsLocked ? 'opacity-40 grayscale pointer-events-none select-none' : ''"
+      :title="player.controlsLocked ? 'The transition editor is using playback' : undefined"
+    />
 
     <!-- First-time setup wizard -->
     <SetupWizard v-if="showSetupWizard" @complete="showSetupWizard = false" />
@@ -395,6 +400,8 @@ function onGlobalKeydown(e: KeyboardEvent) {
 
   // Don't intercept in fullscreen view (it has its own handler)
   if (route.path === '/fullscreen') return
+  // The transition editor owns playback while it's open
+  if (player.controlsLocked) return
 
   switch (e.key) {
     case ' ':
