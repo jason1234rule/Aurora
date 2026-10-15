@@ -209,14 +209,23 @@ export const useLibraryStore = defineStore('library', () => {
     window.api.mergeSettings({ sortOrder: order })
   }
 
-  // Analyse covers that haven't been yet whenever the colour sort is on
+  // Analyse covers that haven't been yet whenever the colour sort is on. The source is
+  // the sorted set of cover paths, so re-sorting as colours arrive doesn't retrigger it.
+  let colorRun = 0
   watch(
-    () => albumSortOrder.value === 'color' ? albums.value.map(a => a.coverArt).filter((c): c is string => !!c) : [],
-    async (covers) => {
-      for (const c of covers) {
-        if (coverColors.value[c] || cachedCoverColor(c)) continue
-        const color = await coverColor(c)
-        if (color) coverColors.value = { ...coverColors.value, [c]: color }
+    () => albumSortOrder.value === 'color'
+      ? [...new Set(albums.value.map(a => a.coverArt).filter((c): c is string => !!c))].sort().join('\n')
+      : '',
+    async (joined) => {
+      const run = ++colorRun
+      const todo = joined ? joined.split('\n').filter(c => !coverColors.value[c] && !cachedCoverColor(c)) : []
+      for (let i = 0; i < todo.length; i += 8) {
+        const batch = todo.slice(i, i + 8)
+        const results = await Promise.all(batch.map(coverColor))
+        if (run !== colorRun) return // the cover set changed; a newer run carries on
+        const next = { ...coverColors.value }
+        batch.forEach((c, j) => { if (results[j]) next[c] = results[j]! })
+        coverColors.value = next
       }
     },
     { immediate: true },
