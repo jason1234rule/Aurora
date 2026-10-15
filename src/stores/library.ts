@@ -1,10 +1,11 @@
 import { defineStore } from 'pinia'
-import { ref, shallowRef, computed, markRaw } from 'vue'
+import { ref, shallowRef, computed, markRaw, watch } from 'vue'
 import { splitArtists } from '@/utils/splitArtists'
 import { useTagsStore } from './tags'
+import { coverColor, cachedCoverColor, colorSortKey, type CoverColor } from '@/utils/coverColor'
 
 export type SortOrder = 'title' | 'artist' | 'album' | 'year' | 'duration'
-export type AlbumSortOrder = 'name' | 'artist' | 'year' | 'tracks'
+export type AlbumSortOrder = 'name' | 'artist' | 'year' | 'tracks' | 'color'
 
 export interface Album {
   id: string
@@ -38,6 +39,8 @@ export const useLibraryStore = defineStore('library', () => {
   const searchQuery = ref('')
   const sortOrder = ref<SortOrder>('title')
   const albumSortOrder = ref<AlbumSortOrder>('name')
+  /** Cover colours for the 'color' sort, filled in lazily (cover path → colour) */
+  const coverColors = ref<Record<string, CoverColor>>({})
   const searchLyricsEnabled = ref(false)
   const separateSoundtracks = ref(true)
   const includeSinglesInAlbums = ref(false)
@@ -76,6 +79,10 @@ export const useLibraryStore = defineStore('library', () => {
         return list.sort((a, b) => (b.year || 0) - (a.year || 0) || a.name.localeCompare(b.name))
       case 'tracks':
         return list.sort((a, b) => b.tracks.length - a.tracks.length || a.name.localeCompare(b.name))
+      case 'color': {
+        const key = (a: Album) => colorSortKey(a.coverArt ? coverColors.value[a.coverArt] ?? cachedCoverColor(a.coverArt) : undefined)
+        return list.sort((a, b) => key(a) - key(b) || a.name.localeCompare(b.name))
+      }
       case 'name':
       default:
         return list.sort((a, b) => a.name.localeCompare(b.name))
@@ -201,6 +208,19 @@ export const useLibraryStore = defineStore('library', () => {
     sortOrder.value = order
     window.api.mergeSettings({ sortOrder: order })
   }
+
+  // Analyse covers that haven't been yet whenever the colour sort is on
+  watch(
+    () => albumSortOrder.value === 'color' ? albums.value.map(a => a.coverArt).filter((c): c is string => !!c) : [],
+    async (covers) => {
+      for (const c of covers) {
+        if (coverColors.value[c] || cachedCoverColor(c)) continue
+        const color = await coverColor(c)
+        if (color) coverColors.value = { ...coverColors.value, [c]: color }
+      }
+    },
+    { immediate: true },
+  )
 
   function setAlbumSortOrder(order: AlbumSortOrder) {
     albumSortOrder.value = order
