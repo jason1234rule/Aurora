@@ -79,14 +79,14 @@
       <!-- Transport + timeline tools -->
       <div class="flex flex-wrap items-center gap-2 mb-3">
         <button
-          @click="previewing ? stopPreview() : startPreview()"
+          @click="previewing ? pausePreview() : startPreview()"
           class="flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium transition-colors"
           :class="previewing ? 'bg-white/[0.12] text-white' : 'bg-accent hover:bg-accent-hover text-white'"
-          title="Space"
+          :title="previewing ? 'Pause where it is (Space)' : 'Play from the start (Space resumes a paused preview)'"
         >
           <svg v-if="!previewing" class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
-          <svg v-else class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M6 6h12v12H6z" /></svg>
-          {{ preparingPreview ? 'Preparing…' : previewing ? 'Stop' : 'Play transition' }}
+          <svg v-else class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M6 5h4v14H6zM14 5h4v14h-4z" /></svg>
+          {{ preparingPreview ? 'Preparing…' : previewing ? 'Pause' : 'Play transition' }}
         </button>
         <select v-model.number="preRoll" class="tx-select" title="How much of the first song to hear before the blend">
           <option :value="5">start 5 s before</option>
@@ -147,7 +147,7 @@
       <p class="text-[11px] text-white/30 mt-2">
         Drag the lower waveform to line up the beats · drag the solid line to move where the blend starts and the dashed line to
         change its length · double-click a fade line to add a point · click the time ruler or drag the white line to jump ·
-        scroll to zoom · Space plays
+        scroll to zoom · Space plays / pauses
       </p>
 
       <!-- Basics + fades -->
@@ -1102,7 +1102,21 @@ async function startPreview(cue?: number) {
   rafId = requestAnimationFrame(tick)
 }
 
+/** Where a paused preview resumes (seconds after the exit); the playhead stays there */
+let pausedCue: number | undefined
+
+/** Pause in place: Space resumes from here, "Play transition" starts over */
+function pausePreview() {
+  const at = previewPosition()
+  const head = playhead.value
+  stopPreview()
+  if (at === undefined) return
+  pausedCue = at
+  playhead.value = head
+}
+
 function stopPreview() {
+  pausedCue = undefined
   previewToken++
   preparingPreview.value = false
   if (rafId) cancelAnimationFrame(rafId)
@@ -1168,7 +1182,7 @@ function onKeydown(e: KeyboardEvent) {
   if (el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA' || el?.tagName === 'SELECT' || el?.isContentEditable) return
   if (e.ctrlKey || e.metaKey) return
   if (e.key === ' ') {
-    previewing.value ? stopPreview() : startPreview()
+    previewing.value ? pausePreview() : startPreview(pausedCue)
   } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
     nudge((e.key === 'ArrowRight' ? 1 : -1) * (e.altKey ? 0.001 : 0.01))
   } else {
