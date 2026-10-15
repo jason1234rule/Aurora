@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, shallowRef, computed, markRaw, watch } from 'vue'
 import { splitArtists } from '@/utils/splitArtists'
 import { useTagsStore } from './tags'
-import { coverColor, cachedCoverColor, colorSortKey, type CoverColor } from '@/utils/coverColor'
+import { coverColor, cachedCoverColor, colorOrder, type CoverColor } from '@/utils/coverColor'
 
 export type SortOrder = 'title' | 'artist' | 'album' | 'year' | 'duration'
 export type AlbumSortOrder = 'name' | 'artist' | 'year' | 'tracks' | 'color'
@@ -79,25 +79,30 @@ export const useLibraryStore = defineStore('library', () => {
         return list.sort((a, b) => (b.year || 0) - (a.year || 0) || a.name.localeCompare(b.name))
       case 'tracks':
         return list.sort((a, b) => b.tracks.length - a.tracks.length || a.name.localeCompare(b.name))
-      case 'color': {
-        const key = (a: Album) => colorSortKey(a.coverArt ? coverColors.value[a.coverArt] ?? cachedCoverColor(a.coverArt) : undefined)
-        return list.sort((a, b) => key(a) - key(b) || a.name.localeCompare(b.name))
-      }
+      case 'color':
+        return colorOrder(list.sort((a, b) => a.name.localeCompare(b.name)), albumColor)
       case 'name':
       default:
         return list.sort((a, b) => a.name.localeCompare(b.name))
     }
   })
 
+  function albumColor(a: Album): CoverColor | undefined {
+    return a.coverArt ? coverColors.value[a.coverArt] ?? cachedCoverColor(a.coverArt) : undefined
+  }
+
   const visibleAlbums = computed<Album[]>(() => {
     const tagsStore = useTagsStore()
-    return albums.value.filter((album) => {
+    const visible = albums.value.filter((album) => {
       if (!includeSinglesInAlbums.value && album.tracks.length <= 1) return false
       if (!separateSoundtracks.value) return true
       const key = `${album.name}---${album.artist}`
       const tags = tagsStore.getAlbumTags(key)
       return !tags.some(tag => soundtrackTagSet.value.has(tag))
     })
+    // The colour chain links each cover to its nearest neighbour, so it has to be built
+    // from the albums actually shown: hidden singles would otherwise sit between look-alikes
+    return albumSortOrder.value === 'color' ? colorOrder(visible, albumColor) : visible
   })
 
   const filteredAlbums = computed<Album[]>(() => {

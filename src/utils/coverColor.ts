@@ -1,92 +1,133 @@
 /**
- * Dominant colour of an album cover, for the "Cover Color" album sort.
+ * Album covers ordered by colour, for the "Cover Color" album sort.
  *
- * Covers are shrunk to 32×32 and every pixel votes for its hue, weighted by how
- * vivid it is (saturated and not near black or white). The winning hue band is the
- * cover's colour. Covers with too little colour overall (black & white photos,
- * white sleeves) count as grey and sort by lightness instead.
+ * Each cover's colour is the main colour a person would name for it: the cover is
+ * shrunk to 32×32, its pixels are grouped into 6 colour clusters (k-means in CIELAB,
+ * where distances match how different colours look), and the biggest cluster wins,
+ * with a boost for colourful clusters so a dark shadow doesn't beat a strong colour
+ * (Starboy reads blue, not black). Clusters close to grey make the cover grey.
+ *
+ * Colourful covers are then chained so each sits next to its most similar neighbour
+ * (nearest-neighbour path tidied with 2-opt), starting from the reddest. Grey covers
+ * follow from white to black. A plain hue sort put look-alike covers far apart
+ * whenever another cover's hue fell between theirs.
  */
 
+/** CIELAB colour: l 0–100, a/b roughly −128…127 */
 export interface CoverColor {
-  /** 0–360, or -1 for a grey cover */
-  hue: number
-  /** 0–1 */
-  lightness: number
+  l: number
+  a: number
+  b: number
 }
 
 const SIZE = 32
-const BANDS = 24
-/** Pixels less vivid than this don't vote for a hue */
-const MIN_PIXEL_VIVIDNESS = 0.08
-/**
- * Covers whose average vividness is below this count as grey. Measured on real
- * covers: black & white photos and white sleeves score under 0.06, pastel covers
- * like "thank u, next" around 0.09, bold colour 0.2+.
- */
-const MIN_COVER_VIVIDNESS = 0.06
+const CLUSTERS = 6
+const ITERATIONS = 12
+/** Weight a cluster's size by BASE + colourfulness (capped), so colour beats shadow */
+const COLOUR_BOOST_BASE = 0.25
+const COLOUR_BOOST_CAP = 30
+/** Below this chroma a cover counts as grey */
+const GREY_CHROMA = 8
 
-export function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
-  r /= 255; g /= 255; b /= 255
-  const max = Math.max(r, g, b), min = Math.min(r, g, b)
-  const l = (max + min) / 2
-  if (max === min) return [0, 0, l]
-  const d = max - min
-  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min)
-  let h = max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4
-  return [h * 60, s, l]
+export const chroma = (c: CoverColor) => Math.hypot(c.a, c.b)
+export const hue = (c: CoverColor) => (Math.atan2(c.b, c.a) * 180 / Math.PI + 360) % 360
+const distance = (p: CoverColor, q: CoverColor) => Math.hypot(p.l - q.l, p.a - q.a, p.b - q.b)
+
+export function rgbToLab(r: number, g: number, b: number): CoverColor {
+  const lin = (c: number) => { c /= 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4 }
+  const R = lin(r), G = lin(g), B = lin(b)
+  const x = (0.4124 * R + 0.3576 * G + 0.1805 * B) / 0.95047
+  const y = 0.2126 * R + 0.7152 * G + 0.0722 * B
+  const z = (0.0193 * R + 0.1192 * G + 0.9505 * B) / 1.08883
+  const f = (t: number) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116)
+  return { l: 116 * f(y) - 16, a: 500 * (f(x) - f(y)), b: 200 * (f(y) - f(z)) }
 }
 
-/** Dominant colour of RGBA pixel data */
+/** Main colour of RGBA pixel data */
 export function dominantColor(rgba: Uint8ClampedArray): CoverColor {
-  const weight = new Float64Array(BANDS)
-  const sinSum = new Float64Array(BANDS), cosSum = new Float64Array(BANDS), lightSum = new Float64Array(BANDS)
-  let vividSum = 0, lightAll = 0, pixels = 0
+  const pts: CoverColor[] = []
   for (let i = 0; i < rgba.length; i += 4) {
-    if (rgba[i + 3] < 128) continue
-    const [h, s, l] = rgbToHsl(rgba[i], rgba[i + 1], rgba[i + 2])
-    pixels++
-    lightAll += l
-    // Vivid = saturated and not near black or white; the square root keeps dark
-    // colours (Starboy's navy) and pastels in the running against small bright accents
-    const w = s * Math.sqrt(Math.max(0, 1 - Math.abs(2 * l - 1)))
-    vividSum += w
-    if (w < MIN_PIXEL_VIVIDNESS) continue
-    const band = Math.floor(h / (360 / BANDS)) % BANDS
-    const rad = h * Math.PI / 180
-    weight[band] += w
-    sinSum[band] += Math.sin(rad) * w
-    cosSum[band] += Math.cos(rad) * w
-    lightSum[band] += l * w
+    if (rgba[i + 3] >= 128) pts.push(rgbToLab(rgba[i], rgba[i + 1], rgba[i + 2]))
   }
-  if (!pixels) return { hue: -1, lightness: 0 }
-  if (vividSum / pixels < MIN_COVER_VIVIDNESS) return { hue: -1, lightness: lightAll / pixels }
+  if (!pts.length) return { l: 0, a: 0, b: 0 }
 
-  // Neighbouring bands count together so a hue on a band edge isn't split in two
+  // k-means, seeded deterministically from evenly spaced pixels
+  let centres = Array.from({ length: Math.min(CLUSTERS, pts.length) }, (_, i) => pts[Math.floor(i * pts.length / CLUSTERS)])
+  let counts: number[] = []
+  for (let it = 0; it < ITERATIONS; it++) {
+    const sums = centres.map(() => ({ l: 0, a: 0, b: 0 }))
+    counts = centres.map(() => 0)
+    for (const p of pts) {
+      let best = 0, bestD = Infinity
+      for (let k = 0; k < centres.length; k++) {
+        const d = (p.l - centres[k].l) ** 2 + (p.a - centres[k].a) ** 2 + (p.b - centres[k].b) ** 2
+        if (d < bestD) { bestD = d; best = k }
+      }
+      sums[best].l += p.l; sums[best].a += p.a; sums[best].b += p.b; counts[best]++
+    }
+    centres = centres.map((c, k) => (counts[k] ? { l: sums[k].l / counts[k], a: sums[k].a / counts[k], b: sums[k].b / counts[k] } : c))
+  }
+
   let best = 0, bestScore = -1
-  for (let b = 0; b < BANDS; b++) {
-    const score = weight[(b + BANDS - 1) % BANDS] * 0.5 + weight[b] + weight[(b + 1) % BANDS] * 0.5
-    if (score > bestScore) { bestScore = score; best = b }
-  }
-  let sin = 0, cos = 0, light = 0, w = 0
-  for (const b of [(best + BANDS - 1) % BANDS, best, (best + 1) % BANDS]) {
-    sin += sinSum[b]; cos += cosSum[b]; light += lightSum[b]; w += weight[b]
-  }
-  const hue = (Math.atan2(sin, cos) * 180 / Math.PI + 360) % 360
-  return { hue, lightness: light / w }
+  centres.forEach((c, k) => {
+    const score = counts[k] * (COLOUR_BOOST_BASE + Math.min(chroma(c), COLOUR_BOOST_CAP) / COLOUR_BOOST_CAP)
+    if (score > bestScore) { bestScore = score; best = k }
+  })
+  return centres[best]
 }
 
 /**
- * Sort key: colourful covers around the colour wheel starting at red
- * (pinks wrap round to the end), then grey covers from white to black.
+ * Order items by their cover colour: colourful ones as a smooth chain starting from
+ * the reddest, then grey ones from white to black, then those without a colour.
  */
-export function colorSortKey(c: CoverColor | undefined): number {
-  if (!c) return 3000 // not analysed yet / no cover: last
-  if (c.hue < 0) return 2000 + (1 - c.lightness) * 100
-  return ((c.hue + 15) % 360) + (1 - c.lightness) * 0.5
+export function colorOrder<T>(items: T[], colorOf: (item: T) => CoverColor | undefined): T[] {
+  const colourful: { item: T; c: CoverColor }[] = []
+  const grey: { item: T; c: CoverColor }[] = []
+  const unknown: T[] = []
+  for (const item of items) {
+    const c = colorOf(item)
+    if (!c) unknown.push(item)
+    else (chroma(c) < GREY_CHROMA ? grey : colourful).push({ item, c })
+  }
+
+  // Greedy nearest-neighbour chain from the reddest colour (pinks sort just before red)
+  const path: typeof colourful = []
+  const rest = [...colourful]
+  if (rest.length) {
+    let start = 0
+    rest.forEach((x, i) => { if ((hue(x.c) + 20) % 360 < (hue(rest[start].c) + 20) % 360) start = i })
+    path.push(rest.splice(start, 1)[0])
+    while (rest.length) {
+      const last = path[path.length - 1].c
+      let next = 0
+      rest.forEach((x, i) => { if (distance(last, x.c) < distance(last, rest[next].c)) next = i })
+      path.push(rest.splice(next, 1)[0])
+    }
+  }
+  // 2-opt: reverse stretches of the chain while that shortens it (start stays fixed)
+  const d = (i: number, j: number) => distance(path[i].c, path[j].c)
+  for (let pass = 0, improved = true; improved && pass < 8; pass++) {
+    improved = false
+    for (let i = 1; i < path.length - 1; i++) {
+      for (let j = i + 1; j < path.length; j++) {
+        const end = j + 1 < path.length
+        const before = d(i - 1, i) + (end ? d(j, j + 1) : 0)
+        const after = d(i - 1, j) + (end ? d(i, j + 1) : 0)
+        if (after < before - 1e-9) {
+          const rev = path.slice(i, j + 1).reverse()
+          path.splice(i, rev.length, ...rev)
+          improved = true
+        }
+      }
+    }
+  }
+
+  grey.sort((x, y) => y.c.l - x.c.l)
+  return [...path.map(x => x.item), ...grey.map(x => x.item), ...unknown]
 }
 
 // ── Cache ────────────────────────────────────────────────────────────────────
-const STORAGE_KEY = 'aurora-cover-colors-v2'
+const STORAGE_KEY = 'aurora-cover-colors-v3'
 const cache = new Map<string, CoverColor>()
 let loaded = false
 
