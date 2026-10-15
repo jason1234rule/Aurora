@@ -73,23 +73,26 @@
           </div>
         </div>
 
-        <div class="hidden md:flex items-center gap-2 shrink-0 text-[11px] text-white/40 tabular-nums">
-          <span class="px-2 py-0.5 rounded-md bg-white/[0.06]">{{ typeLabel[row.t.type] }}</span>
-          <span v-if="row.t.type !== 'cut'">{{ row.t.overlap.toFixed(1) }} s</span>
-          <span v-if="row.t.rateTo && row.t.type !== 'cut'">{{ ((row.t.rateTo - 1) * 100).toFixed(1) }}%</span>
+        <!-- Fixed width so the arrows above line up on every row -->
+        <div class="w-64 shrink-0 flex items-center justify-end gap-2">
+          <div class="hidden md:flex items-center gap-2 shrink-0 text-[11px] text-white/40 tabular-nums">
+            <span class="px-2 py-0.5 rounded-md bg-white/[0.06]">{{ typeLabel[row.t.type] }}</span>
+            <span v-if="row.t.type !== 'cut'">{{ row.t.overlap.toFixed(1) }} s</span>
+            <span v-if="row.t.rateTo && row.t.type !== 'cut'">{{ ((row.t.rateTo - 1) * 100).toFixed(1) }}%</span>
+          </div>
+          <span
+            v-if="row.t.needsReview"
+            class="shrink-0 px-2 py-0.5 rounded-md text-[11px] bg-amber-500/15 text-amber-300/90"
+            title="A file changed length since this was made; open it to check and re-save"
+          >Needs review</span>
+          <span v-else-if="!row.from || !row.to" class="shrink-0 px-2 py-0.5 rounded-md text-[11px] bg-white/[0.06] text-white/40">
+            Song missing
+          </span>
         </div>
-        <span
-          v-if="row.t.needsReview"
-          class="shrink-0 px-2 py-0.5 rounded-md text-[11px] bg-amber-500/15 text-amber-300/90"
-          title="A file changed length since this was made; open it to check and re-save"
-        >Needs review</span>
-        <span v-else-if="!row.from || !row.to" class="shrink-0 px-2 py-0.5 rounded-md text-[11px] bg-white/[0.06] text-white/40">
-          Song missing
-        </span>
 
         <div class="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
           <button
-            v-if="row.from && row.to"
+            :class="row.from && row.to ? '' : 'invisible'"
             @click.stop="audition(row)"
             class="w-8 h-8 rounded-full flex items-center justify-center text-white/40 hover:text-accent hover:bg-white/[0.06]"
             title="Hear it in the player (starts 12 s before the exit)"

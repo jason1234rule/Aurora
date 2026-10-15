@@ -41,6 +41,25 @@ export const useTransitionsStore = defineStore('transitions', () => {
       byPair.value = {}
     }
     loaded.value = true
+    await rekey()
+  }
+
+  /**
+   * Re-derive each endpoint's songKey from its saved title / artist. Needed when the
+   * key rules change (feature credits stopped counting), or the transition would no
+   * longer find its songs. Only touches transitions whose keys actually differ.
+   */
+  async function rekey() {
+    const fresh = (ep: Transition['from']) => (ep.key.startsWith('mbid:') ? ep.key : songKey(ep))
+    for (const t of Object.values(byPair.value)) {
+      const from = fresh(t.from), to = fresh(t.to)
+      if (from === t.from.key && to === t.to.key) continue
+      try {
+        await save({ ...t, from: { ...t.from, key: from }, to: { ...t.to, key: to }, updatedAt: t.updatedAt })
+      } catch (err) {
+        console.error('Failed to re-key transition', t.id, err)
+      }
+    }
   }
 
   function find(from: Track, to: Track): Transition | null {

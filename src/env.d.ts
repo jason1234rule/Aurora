@@ -13,6 +13,8 @@ interface Track {
   path: string
   title: string
   artist: string
+  /** Artists credited as "feat." (they're also in `artist`); weighted lower in listening stats */
+  featuredArtists?: string[]
   album: string
   albumArtist: string
   track: number

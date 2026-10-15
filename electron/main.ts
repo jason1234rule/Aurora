@@ -18,6 +18,7 @@ import { startRemoteServer, stopRemoteServer, registerRemoteIPC, isRemoteEnabled
 import { registerAnimatedCoverIPC, getAlbumArtworkUrl } from './animated-covers'
 import { logger, installGlobalLogHandlers, initLogger, getLogPath } from './logger'
 import { getAppPaths } from './paths'
+import { splitCredits, formatArtists } from '../src/utils/credits'
 
 // Compute XDG-compliant paths and initialise the logger before anything else
 const appPaths = getAppPaths()
@@ -914,13 +915,19 @@ async function parseTrack(filePath: string): Promise<any> {
       }
     }
 
+    // "Kiss Me More (feat. SZA)" by "Doja Cat" → "Kiss Me More" by "Doja Cat & SZA";
+    // featured artists are remembered so listening stats can weight them
+    const credits = splitCredits(metadata.common.title || basename(filePath, extname(filePath)), metadata.common.artist || '')
+    const mainArtists = formatArtists(credits.main)
+
     return {
       id,
       path: filePath,
-      title: metadata.common.title || basename(filePath, extname(filePath)),
-      artist: metadata.common.artist || 'Unknown Artist',
+      title: credits.title,
+      artist: formatArtists([...credits.main, ...credits.featured]) || 'Unknown Artist',
+      ...(credits.featured.length ? { featuredArtists: credits.featured } : {}),
       album: metadata.common.album || 'Unknown Album',
-      albumArtist: metadata.common.albumartist || metadata.common.artist || 'Unknown Artist',
+      albumArtist: metadata.common.albumartist || mainArtists || 'Unknown Artist',
       track: metadata.common.track?.no || 0,
       disc: metadata.common.disk?.no || 1,
       duration: metadata.format.duration && !isNaN(metadata.format.duration) ? Math.round(metadata.format.duration * 1000) / 1000 : 0,
@@ -978,10 +985,12 @@ function lrclibFetch(url: string): Promise<string> {
 
 async function fetchLRCLIB(track: { title: string; artist: string; album: string; duration: number }): Promise<string | null> {
   try {
+    // Lyrics sites list songs under the main artist, not "Doja Cat & SZA"
+    const artist = splitCredits(track.title, track.artist).main[0] || track.artist
     // Try exact match first
     const params = new URLSearchParams({
       track_name: track.title,
-      artist_name: track.artist,
+      artist_name: artist,
       album_name: track.album,
       duration: Math.round(track.duration).toString(),
     })
@@ -995,7 +1004,7 @@ async function fetchLRCLIB(track: { title: string; artist: string; album: string
     // Fallback: search
     const searchParams = new URLSearchParams({
       track_name: track.title,
-      artist_name: track.artist,
+      artist_name: artist,
     })
     const searchUrl = `https://lrclib.net/api/search?${searchParams.toString()}`
     const searchRes = await lrclibFetch(searchUrl)

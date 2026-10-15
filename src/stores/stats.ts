@@ -1,6 +1,9 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { songKey } from '@/utils/smartPlaylistMatcher'
+import { splitCredits, creditShares } from '@/utils/credits'
+import { splitArtists } from '@/utils/splitArtists'
+import { useLibraryStore } from './library'
 
 export type StatsPeriod = '7d' | '30d' | '3mo' | '1y' | 'all'
 
@@ -33,7 +36,9 @@ export const useStatsStore = defineStore('stats', () => {
   async function loadStats() {
     try {
       const result = await window.api.statsLoad()
-      plays.value = result.events
+      // Keys are re-derived so history recorded before feature credits stopped counting
+      // ("Kiss Me More (feat. SZA)") matches the song's current key ("Kiss Me More")
+      plays.value = result.events.map((e: PlayEvent) => (e.key.startsWith('mbid:') ? e : { ...e, key: songKey(e) }))
       deviceId.value = result.deviceId
     } catch { /* stats not critical */ }
     loaded.value = true
@@ -82,18 +87,52 @@ export const useStatsStore = defineStore('stats', () => {
     return Array.from(map.values()).sort((a, b) => b.count - a.count).slice(0, limit)
   }
 
+  /**
+   * Who is credited on a play, main vs featured. Prefers the current library track
+   * (its tags know who is featured); falls back to parsing the play's own title and
+   * artist, which still has "(feat. …)" for plays recorded before credits moved.
+   */
+  function creditsOf(e: PlayEvent): { main: string[]; featured: string[] } {
+    const t = tracksByKey().get(e.key)
+    if (t) {
+      const featured = t.featuredArtists ?? []
+      const main = splitArtists(t.artist).filter(a => !featured.some(f => f.toLowerCase() === a.toLowerCase()))
+      return { main: main.length ? main : [t.artist], featured }
+    }
+    const { main, featured } = splitCredits(e.title, e.artist)
+    return { main: main.length ? main : [e.artist], featured }
+  }
+
+  let keyIndex: { tracks: Track[]; map: Map<string, Track> } | null = null
+  function tracksByKey(): Map<string, Track> {
+    const tracks = useLibraryStore().tracks
+    if (keyIndex?.tracks !== tracks) keyIndex = { tracks, map: new Map(tracks.map(t => [songKey(t), t])) }
+    return keyIndex.map
+  }
+
+  /**
+   * Plays per artist. Each play is shared between its credited artists: co-artists
+   * equally, a main artist twice a featured one (artist + feature = 2/3 + 1/3).
+   * Counts are rounded to whole plays for display; the order uses the exact shares.
+   */
   function topArtists(period: StatsPeriod = 'all', limit = 20): ArtistStat[] {
     const cutoff = getPeriodCutoff(period)
     const map = new Map<string, ArtistStat>()
     for (const e of plays.value) {
       if (e.ts < cutoff) continue
-      const key = e.artist.toLowerCase()
-      if (!map.has(key)) map.set(key, { artist: e.artist, count: 0, totalTime: 0 })
-      const entry = map.get(key)!
-      entry.count++
-      entry.totalTime += e.playedFor
+      const { main, featured } = creditsOf(e)
+      for (const [name, share] of creditShares(main, featured)) {
+        const key = name.toLowerCase()
+        if (!map.has(key)) map.set(key, { artist: name, count: 0, totalTime: 0 })
+        const entry = map.get(key)!
+        entry.count += share
+        entry.totalTime += e.playedFor * share
+      }
     }
-    return Array.from(map.values()).sort((a, b) => b.count - a.count).slice(0, limit)
+    return Array.from(map.values())
+      .sort((a, b) => b.count - a.count)
+      .slice(0, limit)
+      .map(a => ({ ...a, count: Math.round(a.count) }))
   }
 
   function topAlbums(period: StatsPeriod = 'all', limit = 20): AlbumStat[] {
@@ -101,8 +140,10 @@ export const useStatsStore = defineStore('stats', () => {
     const map = new Map<string, AlbumStat>()
     for (const e of plays.value) {
       if (e.ts < cutoff) continue
-      const key = `${e.album.toLowerCase()}||${e.artist.toLowerCase()}`
-      if (!map.has(key)) map.set(key, { album: e.album, artist: e.artist, count: 0 })
+      // Group by the album's main artist, so features don't split an album
+      const artist = creditsOf(e).main[0]
+      const key = `${e.album.toLowerCase()}||${artist.toLowerCase()}`
+      if (!map.has(key)) map.set(key, { album: e.album, artist, count: 0 })
       map.get(key)!.count++
     }
     return Array.from(map.values()).sort((a, b) => b.count - a.count).slice(0, limit)
