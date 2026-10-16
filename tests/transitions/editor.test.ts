@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { PeakPyramid } from '@/utils/transitions/peaks'
 import { mixMapping, moveExit, slideTo, fromSpeed } from '@/utils/transitions/timeline'
-import { splitRates, rateRatio, type TransitionTiming } from '@/utils/transitions/schedule'
+import { splitRates, rateRatio, tempoFits, type TransitionTiming } from '@/utils/transitions/schedule'
 import { previewStretchPlan } from '@/utils/transitions/engine'
 import { planKey } from '@/utils/transitions/stretch/plan'
 import { noise } from './helpers'
@@ -120,6 +120,20 @@ describe('sharing a tempo match between the songs', () => {
     const meet = splitRates(r, 'meet')
     expect(meet.rateTo! * (1 / meet.rateFrom!)).toBeCloseTo(meet.rateTo! ** 2, 12)
     expect(splitRates(1, 'meet')).toEqual({ rateTo: undefined, rateFrom: undefined })
+  })
+  it('lets meeting in the middle close gaps too wide for one song (123 → 111 BPM)', () => {
+    const r = 123 / 111 // TO must play 10.8% faster
+    expect(tempoFits(r, 'to')).toBe(false)
+    expect(tempoFits(r, 'from')).toBe(true) // FROM slows 9.8%
+    expect(tempoFits(r, 'meet')).toBe(true)
+    const meet = splitRates(r, 'meet')
+    expect(rateRatio(meet)).toBeCloseTo(r, 9)
+    expect(Math.abs(meet.rateTo! - 1)).toBeLessThan(0.06)
+    // One song alone stops at its limit
+    expect(splitRates(r, 'to').rateTo).toBeCloseTo(1.1, 12)
+    // Beyond what both songs can do together
+    expect(tempoFits(1.25, 'meet')).toBe(false)
+    expect(rateRatio(splitRates(1.25, 'meet'))).toBeCloseTo(1.21, 9)
   })
 })
 

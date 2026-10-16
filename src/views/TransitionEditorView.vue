@@ -314,7 +314,7 @@
 
           <div class="tx-row">
             <span class="tx-label">Adjust</span>
-            <input type="range" :min="-MAX_RATE_DEVIATION * 100" :max="MAX_RATE_DEVIATION * 100" step="0.01" class="flex-1 min-w-0 accent-accent"
+            <input type="range" :min="rateRange.min" :max="rateRange.max" step="0.01" class="flex-1 min-w-0 accent-accent"
               :value="ratePercent" @input="setRatePercent(+($event.target as HTMLInputElement).value)" />
             <span class="text-xs text-white/60 tabular-nums w-14 text-right">{{ ratePercent >= 0 ? '+' : '' }}{{ ratePercent.toFixed(2) }}%</span>
           </div>
@@ -353,8 +353,8 @@
           <p class="tx-help tx-indent">{{ rampBackHelp }}</p>
 
           <p v-if="tempoTooFar" class="text-[11px] text-amber-300/70 mt-2">
-            These tempos are more than {{ MAX_RATE_DEVIATION * 100 }}% apart, too far to match. A short blend, a quick cut or an echo out will
-            sound cleaner.
+            These tempos are too far apart to match, even with both songs changing speed by up to {{ MAX_RATE_DEVIATION * 100 }}%.
+            A short blend, a quick cut or an echo out will sound cleaner.
           </p>
           <p v-else-if="stretchWarn" class="text-[11px] text-amber-300/70 mt-2">{{ stretchWarnText }}</p>
         </section>
@@ -455,7 +455,7 @@ import { suggestTransition } from '@/utils/transitions/suggest'
 import { moveExit, slideTo, fromSpeed, mixMapping } from '@/utils/transitions/timeline'
 import { renderPreviewSpeed, type PreviewSpeedMix } from '@/utils/transitions/previewSpeed'
 import {
-  clampRate, presetVertices, rateRatio, splitRates, autoStretchMode, pitchOf, rampBackOf, fromPositionAt, fromTimeAt,
+  clampRate, presetVertices, rateRatio, splitRates, ratioRange, tempoFits, autoStretchMode, pitchOf, rampBackOf, fromPositionAt, fromTimeAt,
   MAX_RATE_DEVIATION, STRETCH_WARN_DEVIATION, DEFAULT_RAMP_BACK_BARS, MAX_FROM_RAMP, DEFAULT_ECHO, type TransitionTiming,
 } from '@/utils/transitions/schedule'
 import type { Transition, TransitionEndpoint, BeatGrid, CurvePreset, TransitionType, PitchMode, StretchMode } from '@/types/transition'
@@ -568,8 +568,14 @@ const tempoRatio = computed(() => {
   const f = usable(fromGrid.value), t = usable(toGrid.value)
   return f && t ? f.bpm / t.bpm : null
 })
-const canMatchTempo = computed(() => tempoRatio.value !== null && Math.abs(tempoRatio.value - 1) <= MAX_RATE_DEVIATION)
-const tempoTooFar = computed(() => tempoRatio.value !== null && Math.abs(tempoRatio.value - 1) > MAX_RATE_DEVIATION)
+// Meeting in the middle reaches furthest, so a match is possible if it fits there
+const canMatchTempo = computed(() => tempoRatio.value !== null && tempoFits(tempoRatio.value, 'meet'))
+const tempoTooFar = computed(() => tempoRatio.value !== null && !tempoFits(tempoRatio.value, 'meet'))
+/** The Adjust slider's range for the current mode, in percent */
+const rateRange = computed(() => {
+  const { min, max } = ratioRange(stretchMode.value)
+  return { min: (min - 1) * 100, max: (max - 1) * 100 }
+})
 const echo = computed(() => draft.value?.echo ?? { ...DEFAULT_ECHO })
 const echoBeats = computed(() => {
   if (!fromBeatHeard.value) return 0.75
@@ -854,7 +860,9 @@ function setRatePercent(pct: number) {
 
 /** Stretch mode for a match of `r`, following the "Meet in the middle" setting */
 function autoModeFor(r: number): StretchMode {
-  return autoStretchMode(r, stretchMode.value, player.autoMeet, player.autoMeetPercent / 100)
+  const mode = autoStretchMode(r, stretchMode.value, player.autoMeet, player.autoMeetPercent / 100)
+  // Too far for one song alone: share the change so it still fits
+  return tempoFits(r, mode) || !tempoFits(r, 'meet') ? mode : 'meet'
 }
 
 function matchTempo() {

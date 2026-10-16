@@ -122,11 +122,29 @@ export function rateRatio(t: Pick<Transition, 'rateTo' | 'rateFrom'>): number {
  * 'to' changes only TO, 'from' only FROM, 'meet' moves both halfway (geometrically).
  */
 export function splitRates(ratio: number, mode: StretchMode): Pick<Transition, 'rateTo' | 'rateFrom'> {
-  const r = clampRate(ratio)
+  // Each song may change speed by up to MAX_RATE_DEVIATION, so the gap they can close
+  // depends on how it's shared: meeting in the middle reaches about twice as far
+  const { min, max } = ratioRange(mode)
+  const r = isFinite(ratio) && ratio > 0 ? Math.min(max, Math.max(min, ratio)) : 1
   if (Math.abs(r - 1) < 1e-6) return { rateTo: undefined, rateFrom: undefined }
-  if (mode === 'from') return { rateTo: undefined, rateFrom: clampRate(1 / r) }
+  if (mode === 'from') return { rateTo: undefined, rateFrom: 1 / r }
   if (mode === 'meet') { const h = Math.sqrt(r); return { rateTo: h, rateFrom: 1 / h } }
   return { rateTo: r, rateFrom: undefined }
+}
+
+/** The tempo ratios (TO's speed over FROM's) a stretch mode can match, each song within MAX_RATE_DEVIATION */
+export function ratioRange(mode: StretchMode): { min: number; max: number } {
+  const lo = 1 - MAX_RATE_DEVIATION, hi = 1 + MAX_RATE_DEVIATION
+  if (mode === 'from') return { min: 1 / hi, max: 1 / lo }
+  // rateTo = h and rateFrom = 1/h must both stay in range: h from 1/hi to hi
+  if (mode === 'meet') return { min: 1 / (hi * hi), max: hi * hi }
+  return { min: lo, max: hi }
+}
+
+/** Whether `mode` can match a tempo ratio without either song going past its limit */
+export function tempoFits(ratio: number, mode: StretchMode): boolean {
+  const { min, max } = ratioRange(mode)
+  return ratio >= min - 1e-9 && ratio <= max + 1e-9
 }
 
 /** When Match tempo / suggestions switch an incoming-song match to 'meet' (a user setting) */
