@@ -10,7 +10,7 @@
  * warm white after a moment, then Keystone takes over again.
  */
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { usePlayerStore } from './player'
 import { coverPalette } from '@/utils/coverColor'
 import { getBeatGrid } from '@/utils/transitions/analysis'
@@ -44,6 +44,12 @@ const PAUSE_RELEASE_MS = 4000
 /** Let go of Bluetooth after this long paused, so the Govee app can reach the bulbs */
 const IDLE_DISCONNECT_MS = 3 * 60 * 1000
 const HEARTBEAT_MS = 10000
+/**
+ * Extra delay of Bluetooth headphones (AirPods etc.), which macOS doesn't report: without
+ * it the lights run this far ahead of what you hear
+ */
+const BLUETOOTH_AUDIO_DELAY = 0.2
+const TIMING_TEST_MS = 15000
 
 type Status = 'off' | 'connecting' | 'on' | 'error'
 
@@ -57,6 +63,10 @@ export const useLightsStore = defineStore('lights', () => {
   const statusText = ref('')
   const connected = ref<string[]>([])
   const keystone = ref<'unknown' | 'claimed' | 'released' | 'unreachable'>('unknown')
+  /** Name of the Bluetooth headphones audio is going to, if any (their delay is allowed for) */
+  const bluetoothOutput = ref('')
+  const testing = ref(false)
+  let testUntil = 0
 
   const activeBulbs = computed(() => bulbs.value.filter(b => b.on))
 
@@ -108,6 +118,9 @@ export const useLightsStore = defineStore('lights', () => {
       }
     } catch { /* no settings yet */ }
     onBulbsChange(() => { connected.value = connectedNames() })
+    checkOutput()
+    navigator.mediaDevices?.addEventListener?.('devicechange', checkOutput)
+    watch(() => usePlayerStore().outputDeviceId, checkOutput)
     window.addEventListener('beforeunload', () => { if (claimed) window.api.lightsKeystone('release') })
   }
 
@@ -132,6 +145,28 @@ export const useLightsStore = defineStore('lights', () => {
     save()
     if (b.on && enabled.value) connect()
     if (!b.on) setColour(name, scaleRGB(WARM_WHITE, 0.6))
+  }
+
+  /** Is audio going to Bluetooth headphones? Chromium labels them "… (Bluetooth)" */
+  async function checkOutput() {
+    try {
+      const want = usePlayerStore().outputDeviceId || 'default'
+      const outs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audiooutput')
+      const dev = outs.find(d => d.deviceId === want) ?? outs.find(d => d.deviceId === 'default')
+      const label = dev?.label ?? ''
+      bluetoothOutput.value = /bluetooth|airpods|beats|buds/i.test(label)
+        ? label.replace(/^Default\s*-\s*/i, '').replace(/\s*\(Bluetooth\)\s*$/i, '')
+        : ''
+    } catch {
+      bluetoothOutput.value = ''
+    }
+  }
+
+  /** Bright white on every beat, dark in between, so early or late is easy to see */
+  function timingTest() {
+    testUntil = performance.now() + TIMING_TEST_MS
+    testing.value = true
+    setTimeout(() => { if (performance.now() >= testUntil) testing.value = false }, TIMING_TEST_MS + 50)
   }
 
   // ── Connection ─────────────────────────────────────────────────────────────
@@ -244,11 +279,19 @@ export const useLightsStore = defineStore('lights', () => {
     }
     if (clock.next) loadSong(clock.next.track)
 
-    const ahead = SEND_LEAD + offsetMs.value / 1000 - clock.latency
+    const ahead = SEND_LEAD + offsetMs.value / 1000 - clock.latency - (bluetoothOutput.value ? BLUETOOTH_AUDIO_DELAY : 0)
     const useNext = !!clock.next && clock.next.mix >= 0.5
     const t = (useNext ? clock.next!.pos : clock.pos) + ahead
     const grid = grids.get(useNext ? clock.next!.track.path : track.path) ?? null
     const names = activeBulbs.value.map(b => b.name)
+    if (now < testUntil && usableGrid(grid)) {
+      const { beat, phase } = beatPosition(grid, t)
+      const hit = beat !== lastBeat
+      lastBeat = beat
+      const c: RGB = phase < 0.2 ? [255, 255, 255] : [6, 6, 10]
+      names.forEach(n => send(n, c, hit))
+      return
+    }
     const colours = frame({
       t,
       grid,
@@ -273,8 +316,8 @@ export const useLightsStore = defineStore('lights', () => {
   }
 
   return {
-    enabled, bulbs, intensity, offsetMs, status, statusText, connected, keystone,
-    init, setEnabled, setIntensity, setOffset, toggleBulb, connect,
+    enabled, bulbs, intensity, offsetMs, status, statusText, connected, keystone, bluetoothOutput, testing,
+    init, setEnabled, setIntensity, setOffset, toggleBulb, connect, timingTest, checkOutput,
   }
 })
 

@@ -22,7 +22,15 @@ export function packet(...bytes: number[]): Uint8Array<ArrayBuffer> {
   return out
 }
 
-export const colourPackets = ([r, g, b]: RGB) => [packet(0x33, 0x05, 0x02, r, g, b), packet(0x33, 0x05, 0x0d, r, g, b)]
+/**
+ * The colour packets for a bulb. H6008s answer the older 0x02 form (tested on its own), so
+ * they get just that; anything else gets both, to be safe. Fewer packets matter: the bulbs
+ * share the Mac's Bluetooth radio with headphones.
+ */
+export function colourPackets([r, g, b]: RGB, name = ''): Uint8Array<ArrayBuffer>[] {
+  if (/H6008/i.test(name)) return [packet(0x33, 0x05, 0x02, r, g, b)]
+  return [packet(0x33, 0x05, 0x02, r, g, b), packet(0x33, 0x05, 0x0d, r, g, b)]
+}
 export const powerPacket = (on: boolean) => packet(0x33, 0x01, on ? 1 : 0)
 /** Brightness 0–255 */
 export const brightnessPacket = (level: number) => packet(0x33, 0x04, Math.max(1, Math.min(255, Math.round(level))))
@@ -42,11 +50,12 @@ interface Bulb {
 }
 
 /**
- * Bulbs drop the connection when flooded. These were measured fine (8 colour changes a
- * second per bulb); a beat hit may go out sooner after a fade step so it lands on time.
+ * Bulbs drop the connection when flooded, and the traffic shares the radio with Bluetooth
+ * headphones (which stutter, and macOS then pauses the music). So at most ~5 changes a
+ * second per bulb; a beat hit may go out sooner after a fade step so it lands on time.
  */
-const MIN_GAP_MS = 120
-const BEAT_GAP_MS = 50
+const MIN_GAP_MS = 200
+const BEAT_GAP_MS = 60
 
 const bulbs = new Map<string, Bulb>()
 let keepAliveTimer: ReturnType<typeof setInterval> | null = null
@@ -142,7 +151,7 @@ async function flush(b: Bulb) {
   b.busy = true
   b.lastWrite = performance.now()
   try {
-    for (const p of colourPackets(c)) await write(b, p)
+    for (const p of colourPackets(c, b.name)) await write(b, p)
   } catch { /* a dropped write is fine: the next frame replaces it */ }
   b.busy = false
   if (b.queued) b.queuedTimer = setTimeout(() => { b.queuedTimer = null; flush(b) }, MIN_GAP_MS)

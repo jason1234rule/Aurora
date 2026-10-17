@@ -17,8 +17,9 @@ describe('Govee packets', () => {
     expect([...p.slice(0, 6)]).toEqual([0x33, 0x05, 0x02, 255, 0, 0])
     expect(p[19]).toBe(0x33 ^ 0x05 ^ 0x02 ^ 255)
   })
-  it('send colour in both command variants', () => {
-    expect(colourPackets([1, 2, 3]).map(p => p[2])).toEqual([0x02, 0x0d])
+  it('send colour in both command variants, or just the one an H6008 uses', () => {
+    expect(colourPackets([1, 2, 3], 'ihoment_H6006_9075').map(p => p[2])).toEqual([0x02, 0x0d])
+    expect(colourPackets([1, 2, 3], 'ihoment_H6008_3B85').map(p => p[2])).toEqual([0x02])
   })
 })
 

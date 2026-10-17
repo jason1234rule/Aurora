@@ -273,7 +273,8 @@
           <div class="flex items-center justify-between mb-2">
             <div>
               <p class="text-sm text-white/80">Timing</p>
-              <p class="text-xs text-white/30 mt-0.5">If the lights hit before or after the beat. Bluetooth headphones usually need the lights later.</p>
+              <p class="text-xs text-white/30 mt-0.5">If the lights hit before or after the beat. Play a song and run the test: the lights flash white on each beat for 15 seconds.</p>
+              <p v-if="lights.bluetoothOutput" class="text-xs text-white/50 mt-1">Audio is going to {{ lights.bluetoothOutput }}, so the lights already wait 200 ms for its delay.</p>
             </div>
             <span class="text-sm text-white/60 tabular-nums w-20 text-right">{{ lights.offsetMs > 0 ? '+' : '' }}{{ lights.offsetMs }} ms</span>
           </div>
@@ -284,6 +285,12 @@
             <span class="text-xs text-white/30">earlier</span>
             <button @click="lights.setOffset(0)" class="text-xs text-white/30 hover:text-white/60 transition-colors">Reset</button>
           </div>
+          <button
+            @click="lights.timingTest()"
+            :disabled="!lights.enabled || !player.isPlaying || lights.testing"
+            class="mt-3 px-3 py-1.5 rounded-lg text-xs font-medium bg-white/[0.08] text-white/80 hover:bg-white/[0.12] disabled:opacity-40 transition-colors"
+            :title="!player.isPlaying ? 'Play a song first' : ''"
+          >{{ lights.testing ? 'Testing… watch the lights' : 'Timing test' }}</button>
         </div>
       </div>
     </section>
