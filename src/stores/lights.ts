@@ -26,13 +26,17 @@ export interface LightBulb {
   on: boolean
 }
 
-/** Jason's bedroom, in chase order. The Sunset Light is left out: it can only show red. */
+/**
+ * Jason's bedroom, in chase order: the arc lamp's three shades by the desk, the two ceiling-fan
+ * bulbs (named Dresser and Corner in the Govee app), then the hallway light. The Sunset Light
+ * is left out: it can only show red.
+ */
 const DEFAULT_BULBS: LightBulb[] = [
   { name: 'ihoment_H6008_3B85', label: 'Top', on: true },
   { name: 'ihoment_H6008_A9B9', label: 'Middle', on: true },
   { name: 'ihoment_H6008_7FCD', label: 'Bottom', on: true },
-  { name: 'ihoment_H6008_B597', label: 'Dresser', on: true },
-  { name: 'ihoment_H6006_9075', label: 'Corner', on: true },
+  { name: 'ihoment_H6008_B597', label: 'Fan 1', on: true },
+  { name: 'ihoment_H6006_9075', label: 'Fan 2', on: true },
   { name: 'ihoment_H6006_BC87', label: 'Hall', on: false },
 ]
 
@@ -117,7 +121,9 @@ export const useLightsStore = defineStore('lights', () => {
         if (Array.isArray(s.bulbs)) {
           // Keep saved choices, but pick up any bulb added to the defaults since
           const saved = new Map<string, LightBulb>(s.bulbs.map((b: LightBulb) => [b.name, b]))
-          bulbs.value = [...s.bulbs, ...DEFAULT_BULBS.filter(b => !saved.has(b.name))]
+          // Names come from the defaults (they aren't editable); saved on/off choices are kept
+          const label = new Map(DEFAULT_BULBS.map(b => [b.name, b.label]))
+          bulbs.value = [...s.bulbs.map((b: LightBulb) => ({ ...b, label: label.get(b.name) ?? b.label })), ...DEFAULT_BULBS.filter(b => !saved.has(b.name))]
         }
         if (['chill', 'normal', 'party'].includes(s.intensity)) intensity.value = s.intensity
         if (typeof s.offsetMs === 'number') offsetMs.value = s.offsetMs
