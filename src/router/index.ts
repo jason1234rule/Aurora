@@ -87,6 +87,17 @@ const router = createRouter({
       component: () => import('@/views/TransitionEditorView.vue'),
     },
     {
+      path: '/lights',
+      name: 'lights',
+      component: () => import('@/views/LightsView.vue'),
+    },
+    {
+      // ?id=<show id>, or ?track=<track id> for a new one
+      path: '/lights/edit',
+      name: 'light-edit',
+      component: () => import('@/views/LightShowEditorView.vue'),
+    },
+    {
       path: '/search',
       name: 'search',
       component: () => import('@/views/SearchView.vue'),

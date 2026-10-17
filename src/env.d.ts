@@ -214,6 +214,10 @@ interface Window {
     saveTransition: (transition: import('@/types/transition').Transition) => Promise<Record<string, import('@/types/transition').Transition>>
     deleteTransition: (id: string) => Promise<Record<string, import('@/types/transition').Transition>>
     /** Cached beat grid for a file, or null if missing or the file changed since */
+    getLightShows: () => Promise<import('@/types/lightShow').LightShowsFile>
+    saveLightShow: (show: import('@/types/lightShow').LightShow) => Promise<import('@/types/lightShow').LightShowsFile>
+    deleteLightShow: (id: string) => Promise<import('@/types/lightShow').LightShowsFile>
+    saveLightLooks: (looks: import('@/types/lightShow').LightLook[]) => Promise<import('@/types/lightShow').LightShowsFile>
     getBeatGrid: (filePath: string) => Promise<import('@/types/transition').BeatGrid | null>
     /** Connect room-light bulbs over Bluetooth by name; result per name ('ok' or an error) */
     lightsConnect: (names: string[]) => Promise<Record<string, string>>

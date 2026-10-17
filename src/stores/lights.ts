@@ -12,12 +12,13 @@
 import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
 import { usePlayerStore } from './player'
-import { coverPalette } from '@/utils/coverColor'
-import { getBeatGrid } from '@/utils/transitions/analysis'
 import { frame, usableGrid, beatPosition, WARM_WHITE, type LightIntensity } from '@/utils/lights/show'
 import { setColour, connectedNames, knownNames, onBulbsChange, disconnectAll, retryDisconnected, type RGB } from '@/utils/lights/govee'
-import { computeEnergy, type Energy } from '@/utils/lights/energy'
-import type { BeatGrid } from '@/types/transition'
+import { analyseSong, type SongAnalysis } from '@/utils/lights/analyse'
+import { showFrame, showBeat } from '@/utils/lights/handmade'
+import { useLightShowsStore } from './lightShows'
+import { songKey } from '@/utils/smartPlaylistMatcher'
+import type { LightShow } from '@/types/lightShow'
 
 export interface LightBulb {
   /** Bluetooth name */
@@ -78,39 +79,34 @@ export const useLightsStore = defineStore('lights', () => {
   const activeBulbs = computed(() => bulbs.value.filter(b => b.on))
 
   // ── Per-song data ──────────────────────────────────────────────────────────
-  const grids = new Map<string, BeatGrid | null>()
-  const palettes = new Map<string, RGB[]>()
-  const energies = new Map<string, Energy>()
-  const loading = new Set<string>()
-  let decodeCtx: AudioContext | null = null
+  // Beat grid, energy and cover colours, from the shared song analysis
+  const songs = new Map<string, SongAnalysis | null>()
+  const requested = new Set<string>()
+  function loadSong(track: Track | null | undefined) {
+    if (!track?.path || requested.has(track.path)) return
+    requested.add(track.path)
+    analyseSong(track).then(a => {
+      songs.set(track.path, a)
+      while (songs.size > 40) { const k = songs.keys().next().value!; songs.delete(k); requested.delete(k) }
+    })
+  }
 
-  async function loadSong(track: Track | null | undefined) {
-    if (!track?.path || loading.has(track.path) || grids.has(track.path)) return
-    loading.add(track.path)
-    try {
-      palettes.set(track.path, track.coverArt ? await coverPalette(track.coverArt) : [])
-      // The audio is needed for the energy curve anyway; the beat grid may be cached
-      const data = await (await fetch(window.api.getMediaUrl(track.path))).arrayBuffer()
-      decodeCtx ??= new AudioContext()
-      const buf = await decodeCtx.decodeAudioData(data)
-      const channels = Array.from({ length: buf.numberOfChannels }, (_, c) => buf.getChannelData(c))
-      energies.set(track.path, computeEnergy(channels, buf.sampleRate))
-      let grid: BeatGrid | null = null
-      try {
-        const cached = await window.api.getBeatGrid(track.path)
-        if (usableGrid(cached)) grid = cached
-      } catch { /* analyse below */ }
-      grid ??= await getBeatGrid(track.path, buf)
-      grids.set(track.path, grid)
-    } catch (err) {
-      console.warn('[Lights] Couldn\'t analyse', track.path, err)
-      grids.set(track.path, null)
-    } finally {
-      loading.delete(track.path)
-    }
-    // Keep memory in check: these are small, but a long session adds up
-    while (grids.size > 40) grids.delete(grids.keys().next().value!)
-    while (energies.size > 40) energies.delete(energies.keys().next().value!)
+  // ── Hand-made shows ────────────────────────────────────────────────────────
+  /** The light show editor's unsaved show: played instead of the saved one for its song */
+  let draft: LightShow | null = null
+  function setDraft(show: LightShow | null) { draft = show }
+  function showFor(track: Track): LightShow | null {
+    const key = songKey(track)
+    if (draft?.key === key) return draft
+    const saved = useLightShowsStore().find(track)
+    return saved && !saved.needsReview ? saved : null
+  }
+  /** Bulb colours for one song on its own: its hand-made show, else the automatic style */
+  function coloursFor(track: Track, t: number, names: string[]): RGB[] {
+    const show = showFor(track)
+    if (show) return showFrame(show, t, names)
+    const a = songs.get(track.path)
+    return frame({ t, grid: a?.grid ?? null, energy: a?.energy ?? null, palette: a?.palette ?? [], bulbs: names.length, intensity: intensity.value })
   }
 
   // ── Settings ───────────────────────────────────────────────────────────────
@@ -374,23 +370,40 @@ export const useLightsStore = defineStore('lights', () => {
     if (clock.next) loadSong(clock.next.track)
 
     const ahead = SEND_LEAD + offsetMs.value / 1000 - clock.latency - (bluetoothOutput.value ? BLUETOOTH_AUDIO_DELAY : 0)
-    const useNext = !!clock.next && clock.next.mix >= 0.5
-    const t = (useNext ? clock.next!.pos : clock.pos) + ahead
-    const grid = grids.get(useNext ? clock.next!.track.path : track.path) ?? null
     const names = activeBulbs.value.map(b => b.name)
-    const colours = frame({
-      t,
-      grid,
-      energy: energies.get(useNext ? clock.next!.track.path : track.path) ?? null,
-      palette: palettes.get(track.path) ?? [],
-      bulbs: names.length,
-      intensity: intensity.value,
-      next: clock.next ? { palette: palettes.get(clock.next.track.path) ?? palettes.get(track.path) ?? [], mix: clock.next.mix } : undefined,
-      flash: clock.next?.sinceBassSwap != null && clock.next.sinceBassSwap >= 0 ? Math.exp(-clock.next.sinceBassSwap * 5) : 0,
-    })
-    // Party: on a new beat send everything, so every bulb hits at once
-    const beat = usableGrid(grid) ? beatPosition(grid, t).beat : -1
-    const onBeat = beat !== lastBeat && intensity.value === 'party'
+    const t = clock.pos + ahead
+    const next = clock.next
+    const flash = next?.sinceBassSwap != null && next.sinceBassSwap >= 0 ? Math.exp(-next.sinceBassSwap * 5) : 0
+    const current = next && next.mix >= 0.5 ? next.track : track
+    const currentT = next && next.mix >= 0.5 ? next.pos + ahead : t
+    let colours: RGB[]
+    if (next && (showFor(track) || showFor(next.track))) {
+      // A hand-made show on either side: blend the two songs' lights through the transition
+      const a = coloursFor(track, t, names), b = coloursFor(next.track, next.pos + ahead, names)
+      colours = a.map((c, i) => c.map((v, k) => {
+        const m = v + (b[i][k] - v) * next.mix
+        return Math.round(m + (255 - m) * flash * 0.6)
+      }) as RGB)
+    } else if (next) {
+      const a = songs.get(current.path)
+      colours = frame({
+        t: currentT,
+        grid: a?.grid ?? null,
+        energy: a?.energy ?? null,
+        palette: songs.get(track.path)?.palette ?? [],
+        bulbs: names.length,
+        intensity: intensity.value,
+        next: { palette: songs.get(next.track.path)?.palette ?? songs.get(track.path)?.palette ?? [], mix: next.mix },
+        flash,
+      })
+    } else {
+      colours = coloursFor(track, t, names)
+    }
+    // On a new beat send everything, so every bulb hits at once (hand-made shows and Party)
+    const showNow = showFor(current)
+    const grid = songs.get(current.path)?.grid ?? null
+    const beat = showNow ? showBeat(showNow, currentT) : usableGrid(grid) ? beatPosition(grid, currentT).beat : -1
+    const onBeat = beat !== lastBeat && (!!showNow || intensity.value === 'party')
     lastBeat = beat
     names.forEach((n, i) => send(n, colours[i], onBeat))
   }
@@ -404,7 +417,7 @@ export const useLightsStore = defineStore('lights', () => {
 
   return {
     enabled, bulbs, intensity, offsetMs, status, statusText, connected, keystone, bluetoothOutput, testing,
-    init, setEnabled, setIntensity, setOffset, toggleBulb, connect, reconnectAll, timingTest, checkOutput,
+    init, setDraft, setEnabled, setIntensity, setOffset, toggleBulb, connect, reconnectAll, timingTest, checkOutput,
   }
 })
 

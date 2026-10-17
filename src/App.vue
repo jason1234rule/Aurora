@@ -63,6 +63,7 @@ import { useStatsStore } from '@/stores/stats'
 import { useSyncStore } from '@/stores/sync'
 import { useTransitionsStore } from '@/stores/transitions'
 import { useLightsStore } from '@/stores/lights'
+import { useLightShowsStore } from '@/stores/lightShows'
 import { installTransitionDevHook } from '@/utils/transitions/devHook'
 import Titlebar from '@/components/Titlebar.vue'
 import Sidebar from '@/components/Sidebar.vue'
@@ -153,6 +154,7 @@ onMounted(async () => {
   await favoritesStore.load()
   await tagsStore.load()
   await transitionsStore.load()
+  useLightShowsStore().load()
 
   let devFlag = false
   try { devFlag = localStorage.getItem('aurora-dev') === '1' } catch { /* storage unavailable */ }

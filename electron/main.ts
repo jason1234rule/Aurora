@@ -777,6 +777,38 @@ async function saveTags(): Promise<void> {
   await writeFile(tagsPath, JSON.stringify({ trackTags: trackTagsData, albumTags: albumTagsData }, null, 2))
 }
 
+// ── Hand-made light shows persistence ──────────────────────────────────────
+// { shows: { [songKey]: show }, looks: [...] }, written the same careful way as transitions
+const lightShowsPath = join(dataPath, 'lightshows.json')
+let lightShowsData: { shows: Record<string, any>; looks: any[] } = { shows: {}, looks: [] }
+let lightShowsLoaded = false
+
+async function loadLightShows() {
+  if (lightShowsLoaded) return lightShowsData
+  try {
+    if (existsSync(lightShowsPath)) {
+      const raw = JSON.parse(await readFile(lightShowsPath, 'utf-8'))
+      lightShowsData = { shows: raw.shows || {}, looks: Array.isArray(raw.looks) ? raw.looks : [] }
+    }
+  } catch (err) {
+    logger.error('Failed to read lightshows.json:', err)
+    try { await rename(lightShowsPath, `${lightShowsPath}.corrupt-${Date.now()}`) } catch {}
+  }
+  lightShowsLoaded = true
+  return lightShowsData
+}
+
+let _lightShowsSaveQueue: Promise<void> = Promise.resolve()
+function saveLightShows(): Promise<void> {
+  const run = _lightShowsSaveQueue.then(async () => {
+    const tmp = lightShowsPath + '.tmp'
+    await writeFile(tmp, JSON.stringify({ version: 1, ...lightShowsData }, null, 2))
+    await rename(tmp, lightShowsPath)
+  })
+  _lightShowsSaveQueue = run.catch(() => {})
+  return run
+}
+
 // ── Hand-made transitions persistence ──────────────────────────────────────
 // User-authored song→song transitions, keyed by "fromSongKey→toSongKey".
 const transitionsPath = join(dataPath, 'transitions.json')
@@ -1967,6 +1999,31 @@ app.whenReady().then(async () => {
     }
     await saveTransitions()
     return transitionsData
+  })
+
+  // ── IPC: Light shows ──
+  ipcMain.handle('lightshows:get', async () => await loadLightShows())
+  ipcMain.handle('lightshows:save', async (_, show: any) => {
+    await loadLightShows()
+    if (!show || typeof show.id !== 'string' || typeof show.key !== 'string' || !Array.isArray(show.blocks)) throw new Error('Invalid light show')
+    // One show per song; drop an older copy of this id (e.g. its songKey changed)
+    for (const [k, v] of Object.entries(lightShowsData.shows)) if (v?.id === show.id) delete lightShowsData.shows[k]
+    lightShowsData.shows[show.key] = show
+    await saveLightShows()
+    return lightShowsData
+  })
+  ipcMain.handle('lightshows:delete', async (_, id: string) => {
+    await loadLightShows()
+    for (const [k, v] of Object.entries(lightShowsData.shows)) if (v?.id === id) delete lightShowsData.shows[k]
+    await saveLightShows()
+    return lightShowsData
+  })
+  ipcMain.handle('lightshows:save-looks', async (_, looks: any[]) => {
+    await loadLightShows()
+    if (!Array.isArray(looks)) throw new Error('Invalid looks')
+    lightShowsData.looks = looks
+    await saveLightShows()
+    return lightShowsData
   })
 
   // ── IPC: Beat grid cache ──

@@ -67,6 +67,10 @@ contextBridge.exposeInMainWorld('api', {
 
   // Hand-made transitions
   getTransitions: () => ipcRenderer.invoke('transitions:get'),
+  getLightShows: () => ipcRenderer.invoke('lightshows:get'),
+  saveLightShow: (show: any) => ipcRenderer.invoke('lightshows:save', show),
+  deleteLightShow: (id: string) => ipcRenderer.invoke('lightshows:delete', id),
+  saveLightLooks: (looks: any[]) => ipcRenderer.invoke('lightshows:save-looks', looks),
   saveTransition: (transition: any) => ipcRenderer.invoke('transitions:save', transition),
   deleteTransition: (id: string) => ipcRenderer.invoke('transitions:delete', id),
   getBeatGrid: (filePath: string) => ipcRenderer.invoke('beatgrid:get', filePath),
