@@ -16,6 +16,7 @@ import { coverPalette } from '@/utils/coverColor'
 import { getBeatGrid } from '@/utils/transitions/analysis'
 import { frame, usableGrid, beatPosition, WARM_WHITE, type LightIntensity } from '@/utils/lights/show'
 import { setColour, connectedNames, knownNames, onBulbsChange, disconnectAll, retryDisconnected, type RGB } from '@/utils/lights/govee'
+import { computeEnergy, type Energy } from '@/utils/lights/energy'
 import type { BeatGrid } from '@/types/transition'
 
 export interface LightBulb {
@@ -75,6 +76,7 @@ export const useLightsStore = defineStore('lights', () => {
   // ── Per-song data ──────────────────────────────────────────────────────────
   const grids = new Map<string, BeatGrid | null>()
   const palettes = new Map<string, RGB[]>()
+  const energies = new Map<string, Energy>()
   const loading = new Set<string>()
   let decodeCtx: AudioContext | null = null
 
@@ -83,16 +85,18 @@ export const useLightsStore = defineStore('lights', () => {
     loading.add(track.path)
     try {
       palettes.set(track.path, track.coverArt ? await coverPalette(track.coverArt) : [])
+      // The audio is needed for the energy curve anyway; the beat grid may be cached
+      const data = await (await fetch(window.api.getMediaUrl(track.path))).arrayBuffer()
+      decodeCtx ??= new AudioContext()
+      const buf = await decodeCtx.decodeAudioData(data)
+      const channels = Array.from({ length: buf.numberOfChannels }, (_, c) => buf.getChannelData(c))
+      energies.set(track.path, computeEnergy(channels, buf.sampleRate))
       let grid: BeatGrid | null = null
       try {
         const cached = await window.api.getBeatGrid(track.path)
         if (usableGrid(cached)) grid = cached
       } catch { /* analyse below */ }
-      if (!grid) {
-        const data = await (await fetch(window.api.getMediaUrl(track.path))).arrayBuffer()
-        decodeCtx ??= new AudioContext()
-        grid = await getBeatGrid(track.path, await decodeCtx.decodeAudioData(data))
-      }
+      grid ??= await getBeatGrid(track.path, buf)
       grids.set(track.path, grid)
     } catch (err) {
       console.warn('[Lights] Couldn\'t analyse', track.path, err)
@@ -102,6 +106,7 @@ export const useLightsStore = defineStore('lights', () => {
     }
     // Keep memory in check: these are small, but a long session adds up
     while (grids.size > 40) grids.delete(grids.keys().next().value!)
+    while (energies.size > 40) energies.delete(energies.keys().next().value!)
   }
 
   // ── Settings ───────────────────────────────────────────────────────────────
@@ -370,15 +375,16 @@ export const useLightsStore = defineStore('lights', () => {
     const colours = frame({
       t,
       grid,
+      energy: energies.get(useNext ? clock.next!.track.path : track.path) ?? null,
       palette: palettes.get(track.path) ?? [],
       bulbs: names.length,
       intensity: intensity.value,
       next: clock.next ? { palette: palettes.get(clock.next.track.path) ?? palettes.get(track.path) ?? [], mix: clock.next.mix } : undefined,
       flash: clock.next?.sinceBassSwap != null && clock.next.sinceBassSwap >= 0 ? Math.exp(-clock.next.sinceBassSwap * 5) : 0,
     })
-    // On a new beat send everything, so every bulb hits at once
+    // Party: on a new beat send everything, so every bulb hits at once
     const beat = usableGrid(grid) ? beatPosition(grid, t).beat : -1
-    const onBeat = beat !== lastBeat
+    const onBeat = beat !== lastBeat && intensity.value === 'party'
     lastBeat = beat
     names.forEach((n, i) => send(n, colours[i], onBeat))
   }

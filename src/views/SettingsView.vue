@@ -1691,9 +1691,9 @@ const library = useLibraryStore()
 const player = usePlayerStore()
 const lights = useLightsStore()
 const intensityHelp = {
-  chill: 'Gentle pulses that never go dark',
-  normal: 'Clear pulse on every beat, bigger on the first of each bar',
-  party: 'A chase: one light per beat takes the hit',
+  chill: 'Steady colours that drift slowly and brighten a little in loud parts',
+  normal: 'Follows the song: dim and slow in quiet parts, bright and moving in the loud ones',
+  party: 'Hits on every beat, colours change each bar, drops flash white',
 }
 const lightsStatusLine = computed(() => {
   const on = lights.bulbs.filter(b => b.on).length
