@@ -23,12 +23,13 @@ export function packet(...bytes: number[]): Uint8Array<ArrayBuffer> {
 }
 
 /**
- * The colour packets for a bulb. H6008s answer the older 0x02 form (tested on its own), so
- * they get just that; anything else gets both, to be safe. Fewer packets matter: the bulbs
- * share the Mac's Bluetooth radio with headphones.
+ * The colour packets for a bulb, by model (each tested on its own): H6008s use the 0x02
+ * form, H6006s only 0x0D. Unknown models get both. One packet matters: the bulbs share the
+ * Mac's Bluetooth radio with headphones, and H6006s drop off when sent the form they ignore.
  */
 export function colourPackets([r, g, b]: RGB, name = ''): Uint8Array<ArrayBuffer>[] {
   if (/H6008/i.test(name)) return [packet(0x33, 0x05, 0x02, r, g, b)]
+  if (/H6006/i.test(name)) return [packet(0x33, 0x05, 0x0d, r, g, b)]
   return [packet(0x33, 0x05, 0x02, r, g, b), packet(0x33, 0x05, 0x0d, r, g, b)]
 }
 export const powerPacket = (on: boolean) => packet(0x33, 0x01, on ? 1 : 0)
@@ -46,6 +47,8 @@ interface Bulb {
   queued: RGB | null
   queuedTimer: ReturnType<typeof setTimeout> | null
   lastWrite: number
+  /** Takes acknowledged writes (H6008s do, H6006s refuse them) */
+  acked: boolean
   reconnecting: boolean
 }
 
@@ -70,8 +73,23 @@ async function attach(b: Bulb) {
   await write(b, brightnessPacket(255))
 }
 
+/**
+ * Acknowledged writes where the bulb takes them, so each waits for it: when the radio is busy
+ * (headphones streaming) updates slow down instead of piling up until the connection times
+ * out. Bulbs that refuse them (H6006) get unacknowledged writes.
+ */
 async function write(b: Bulb, data: Uint8Array<ArrayBuffer>) {
   if (!b.char) return
+  if (b.acked && !/H6006/i.test(b.name)) {
+    try {
+      await b.char.writeValueWithResponse(data)
+      return
+    } catch (err) {
+      const name = err instanceof Error ? err.name : ''
+      if (name !== 'NotSupportedError' && name !== 'NotAllowedError') throw err
+      b.acked = false
+    }
+  }
   await b.char.writeValueWithoutResponse(data)
 }
 
@@ -103,7 +121,7 @@ async function connectOne(name: string): Promise<string> {
       filters: [{ name }],
       optionalServices: [GOVEE_SERVICE],
     })
-    const b: Bulb = existing ?? { name, device, char: null, busy: false, queued: null, queuedTimer: null, lastWrite: 0, reconnecting: false }
+    const b: Bulb = existing ?? { name, device, char: null, busy: false, queued: null, queuedTimer: null, lastWrite: 0, acked: true, reconnecting: false }
     if (!existing) {
       bulbs.set(name, b)
       device.addEventListener('gattserverdisconnected', () => { reconnect(b) })

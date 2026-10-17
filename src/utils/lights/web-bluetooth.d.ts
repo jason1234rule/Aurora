@@ -1,6 +1,7 @@
 // The parts of Web Bluetooth the room lights use (TypeScript's DOM lib doesn't include it)
 interface BluetoothRemoteGATTCharacteristic {
   writeValueWithoutResponse(value: BufferSource): Promise<void>
+  writeValueWithResponse(value: BufferSource): Promise<void>
 }
 interface BluetoothRemoteGATTService {
   getCharacteristic(uuid: string): Promise<BluetoothRemoteGATTCharacteristic>
