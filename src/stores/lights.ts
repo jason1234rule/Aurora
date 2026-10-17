@@ -15,7 +15,7 @@ import { usePlayerStore } from './player'
 import { coverPalette } from '@/utils/coverColor'
 import { getBeatGrid } from '@/utils/transitions/analysis'
 import { frame, usableGrid, beatPosition, WARM_WHITE, type LightIntensity } from '@/utils/lights/show'
-import { setColour, connectedNames, knownNames, onBulbsChange, disconnectAll, type RGB } from '@/utils/lights/govee'
+import { setColour, connectedNames, knownNames, onBulbsChange, disconnectAll, retryDisconnected, type RGB } from '@/utils/lights/govee'
 import type { BeatGrid } from '@/types/transition'
 
 export interface LightBulb {
@@ -251,6 +251,7 @@ export const useLightsStore = defineStore('lights', () => {
     status.value = 'connecting'
     statusText.value = `Connecting to ${missing.length} light${missing.length > 1 ? 's' : ''}…`
     connecting = window.api.lightsConnect(missing).then(results => {
+      console.info('[Lights] Connect results:', JSON.stringify(results))
       connected.value = connectedNames()
       const failed = Object.entries(results).filter(([, r]) => r !== 'ok')
       const label = (n: string) => bulbs.value.find(b => b.name === n)?.label ?? n
@@ -263,6 +264,13 @@ export const useLightsStore = defineStore('lights', () => {
       }
     }).finally(() => { connecting = null })
     return connecting
+  }
+
+  /** Settings' Reconnect button: retry found bulbs and look again for missing ones */
+  function reconnectAll() {
+    retryDisconnected()
+    if (status.value === 'error') status.value = 'connecting'
+    connect()
   }
 
   // ── Keystone ───────────────────────────────────────────────────────────────
@@ -382,7 +390,7 @@ export const useLightsStore = defineStore('lights', () => {
 
   return {
     enabled, bulbs, intensity, offsetMs, status, statusText, connected, keystone, bluetoothOutput, testing,
-    init, setEnabled, setIntensity, setOffset, toggleBulb, connect, timingTest, checkOutput,
+    init, setEnabled, setIntensity, setOffset, toggleBulb, connect, reconnectAll, timingTest, checkOutput,
   }
 })
 

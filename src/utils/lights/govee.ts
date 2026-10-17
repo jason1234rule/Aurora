@@ -77,6 +77,7 @@ async function write(b: Bulb, data: Uint8Array<ArrayBuffer>) {
 
 async function reconnect(b: Bulb) {
   if (b.reconnecting || !bulbs.has(b.name)) return
+  console.info('[Lights] Reconnecting', b.name)
   b.reconnecting = true
   b.char = null
   changed()
@@ -107,13 +108,25 @@ async function connectOne(name: string): Promise<string> {
       bulbs.set(name, b)
       device.addEventListener('gattserverdisconnected', () => { reconnect(b) })
     }
-    await attach(b)
     if (!keepAliveTimer) keepAliveTimer = setInterval(keepAlive, 2000)
+    try {
+      await attach(b)
+    } catch (err) {
+      // Found but couldn't connect (busy, or the Bluetooth permission prompt was up): keep
+      // trying in the background rather than leaving it stuck
+      reconnect(b)
+      throw err
+    }
     changed()
     return 'ok'
   } catch (err) {
     return err instanceof Error ? err.message : String(err)
   }
+}
+
+/** Retry every found bulb that isn't connected (the Reconnect button) */
+export function retryDisconnected() {
+  for (const b of bulbs.values()) if (!b.char && !b.reconnecting) reconnect(b)
 }
 
 function keepAlive() {

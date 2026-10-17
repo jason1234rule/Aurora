@@ -223,6 +223,11 @@
             </p>
             <p v-if="lights.enabled" class="text-xs mt-1" :class="lights.status === 'error' ? 'text-red-400/80' : 'text-white/50'">
               {{ lightsStatusLine }}
+              <button
+                v-if="lights.connected.length < lights.bulbs.filter(b => b.on).length && lights.status !== 'connecting'"
+                @click="lights.reconnectAll()"
+                class="ml-2 underline text-white/60 hover:text-white"
+              >Reconnect</button>
             </p>
           </div>
           <button
