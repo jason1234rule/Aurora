@@ -49,6 +49,10 @@ interface Bulb {
   lastWrite: number
   /** Takes acknowledged writes (H6008s do, H6006s refuse them) */
   acked: boolean
+  /** For debugging from the console: window.__auroraLights.stats() */
+  writes: number
+  errors: number
+  lastError: string
   reconnecting: boolean
 }
 
@@ -121,7 +125,7 @@ async function connectOne(name: string): Promise<string> {
       filters: [{ name }],
       optionalServices: [GOVEE_SERVICE],
     })
-    const b: Bulb = existing ?? { name, device, char: null, busy: false, queued: null, queuedTimer: null, lastWrite: 0, acked: true, reconnecting: false }
+    const b: Bulb = existing ?? { name, device, char: null, busy: false, queued: null, queuedTimer: null, lastWrite: 0, acked: true, writes: 0, errors: 0, lastError: '', reconnecting: false }
     if (!existing) {
       bulbs.set(name, b)
       device.addEventListener('gattserverdisconnected', () => { reconnect(b) })
@@ -183,7 +187,12 @@ async function flush(b: Bulb) {
   b.lastWrite = performance.now()
   try {
     for (const p of colourPackets(c, b.name)) await write(b, p)
-  } catch { /* a dropped write is fine: the next frame replaces it */ }
+    b.writes++
+  } catch (err) {
+    // A dropped write is fine (the next frame replaces it), but keep count for debugging
+    b.errors++
+    b.lastError = err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+  }
   b.busy = false
   if (b.queued) b.queuedTimer = setTimeout(() => { b.queuedTimer = null; flush(b) }, MIN_GAP_MS)
 }
@@ -213,6 +222,9 @@ export function disconnectAll() {
 }
 
 declare global {
-  interface Window { __auroraLights?: { connectOne: (name: string) => Promise<string> } }
+  interface Window { __auroraLights?: { connectOne: (name: string) => Promise<string>; stats: () => unknown } }
 }
-if (typeof window !== 'undefined') window.__auroraLights = { connectOne }
+function stats() {
+  return [...bulbs.values()].map(b => ({ name: b.name, connected: !!b.char, acked: b.acked, writes: b.writes, errors: b.errors, lastError: b.lastError }))
+}
+if (typeof window !== 'undefined') window.__auroraLights = { connectOne, stats }

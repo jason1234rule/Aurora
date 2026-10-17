@@ -218,6 +218,8 @@ interface Window {
     /** Connect room-light bulbs over Bluetooth by name; result per name ('ok' or an error) */
     lightsConnect: (names: string[]) => Promise<Record<string, string>>
     lightsKeystone: (action: 'claim' | 'update' | 'release', body?: any) => Promise<any>
+    /** Stop Chromium throttling timers while the window is hidden (the light show needs them) */
+    lightsKeepRunning: (on: boolean) => Promise<void>
     saveBeatGrid: (filePath: string, grid: import('@/types/transition').BeatGrid) => Promise<void>
     updateDiscordPresence: (data: any) => Promise<void>
     toggleDiscordRPC: (enabled: boolean, clientId?: string) => Promise<void>

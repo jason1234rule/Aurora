@@ -308,6 +308,7 @@ export const useLightsStore = defineStore('lights', () => {
 
   function start() {
     if (timer) return
+    window.api.lightsKeepRunning(true)
     connect()
     timer = setInterval(tick, TICK_MS)
   }
@@ -315,6 +316,7 @@ export const useLightsStore = defineStore('lights', () => {
   function stop() {
     if (timer) clearInterval(timer)
     timer = null
+    window.api.lightsKeepRunning(false)
     for (const b of activeBulbs.value) setColour(b.name, scaleRGB(WARM_WHITE, 0.6))
     release()
     setTimeout(disconnectAll, 1500)

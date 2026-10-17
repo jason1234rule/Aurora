@@ -1985,6 +1985,11 @@ app.whenReady().then(async () => {
     }
     return results
   })
+  // Chromium slows timers to about once a second (once a minute after a while) when the
+  // window is hidden or covered, which stalls the light show; keep them running while it's on
+  ipcMain.handle('lights:keep-running', (_, on: boolean) => {
+    mainWindow?.webContents.setBackgroundThrottling(!on)
+  })
   // Keystone (localhost:8777): tells it Aurora has the lights, so it pauses "Match outside"
   // and shows who's in control. From here rather than the renderer to avoid CORS.
   ipcMain.handle('lights:keystone', async (_, action: string, body: any) => {

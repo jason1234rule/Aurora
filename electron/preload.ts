@@ -71,6 +71,7 @@ contextBridge.exposeInMainWorld('api', {
   deleteTransition: (id: string) => ipcRenderer.invoke('transitions:delete', id),
   getBeatGrid: (filePath: string) => ipcRenderer.invoke('beatgrid:get', filePath),
   lightsConnect: (names: string[]) => ipcRenderer.invoke('lights:connect', names),
+  lightsKeepRunning: (on: boolean) => ipcRenderer.invoke('lights:keep-running', on),
   lightsKeystone: (action: 'claim' | 'update' | 'release', body?: any) => ipcRenderer.invoke('lights:keystone', action, body),
   saveBeatGrid: (filePath: string, grid: any) => ipcRenderer.invoke('beatgrid:set', filePath, grid),
 
