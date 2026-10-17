@@ -1,10 +1,11 @@
 import { defineStore } from 'pinia'
-import { ref, shallowRef, computed, markRaw } from 'vue'
+import { ref, shallowRef, computed, markRaw, watch } from 'vue'
 import { splitArtists } from '@/utils/splitArtists'
 import { useTagsStore } from './tags'
+import { coverColor, cachedCoverColor, colorOrder, type CoverColor } from '@/utils/coverColor'
 
 export type SortOrder = 'title' | 'artist' | 'album' | 'year' | 'duration'
-export type AlbumSortOrder = 'name' | 'artist' | 'year' | 'tracks'
+export type AlbumSortOrder = 'name' | 'artist' | 'year' | 'tracks' | 'color'
 
 export interface Album {
   id: string
@@ -38,6 +39,8 @@ export const useLibraryStore = defineStore('library', () => {
   const searchQuery = ref('')
   const sortOrder = ref<SortOrder>('title')
   const albumSortOrder = ref<AlbumSortOrder>('name')
+  /** Cover colours for the 'color' sort, filled in lazily (cover path → colour) */
+  const coverColors = ref<Record<string, CoverColor>>({})
   const searchLyricsEnabled = ref(false)
   const separateSoundtracks = ref(true)
   const includeSinglesInAlbums = ref(false)
@@ -76,21 +79,30 @@ export const useLibraryStore = defineStore('library', () => {
         return list.sort((a, b) => (b.year || 0) - (a.year || 0) || a.name.localeCompare(b.name))
       case 'tracks':
         return list.sort((a, b) => b.tracks.length - a.tracks.length || a.name.localeCompare(b.name))
+      case 'color':
+        return colorOrder(list.sort((a, b) => a.name.localeCompare(b.name)), albumColor)
       case 'name':
       default:
         return list.sort((a, b) => a.name.localeCompare(b.name))
     }
   })
 
+  function albumColor(a: Album): CoverColor | undefined {
+    return a.coverArt ? coverColors.value[a.coverArt] ?? cachedCoverColor(a.coverArt) : undefined
+  }
+
   const visibleAlbums = computed<Album[]>(() => {
     const tagsStore = useTagsStore()
-    return albums.value.filter((album) => {
+    const visible = albums.value.filter((album) => {
       if (!includeSinglesInAlbums.value && album.tracks.length <= 1) return false
       if (!separateSoundtracks.value) return true
       const key = `${album.name}---${album.artist}`
       const tags = tagsStore.getAlbumTags(key)
       return !tags.some(tag => soundtrackTagSet.value.has(tag))
     })
+    // The colour chain links each cover to its nearest neighbour, so it has to be built
+    // from the albums actually shown: hidden singles would otherwise sit between look-alikes
+    return albumSortOrder.value === 'color' ? colorOrder(visible, albumColor) : visible
   })
 
   const filteredAlbums = computed<Album[]>(() => {
@@ -201,6 +213,28 @@ export const useLibraryStore = defineStore('library', () => {
     sortOrder.value = order
     window.api.mergeSettings({ sortOrder: order })
   }
+
+  // Analyse covers that haven't been yet whenever the colour sort is on. The source is
+  // the sorted set of cover paths, so re-sorting as colours arrive doesn't retrigger it.
+  let colorRun = 0
+  watch(
+    () => albumSortOrder.value === 'color'
+      ? [...new Set(albums.value.map(a => a.coverArt).filter((c): c is string => !!c))].sort().join('\n')
+      : '',
+    async (joined) => {
+      const run = ++colorRun
+      const todo = joined ? joined.split('\n').filter(c => !coverColors.value[c] && !cachedCoverColor(c)) : []
+      for (let i = 0; i < todo.length; i += 8) {
+        const batch = todo.slice(i, i + 8)
+        const results = await Promise.all(batch.map(coverColor))
+        if (run !== colorRun) return // the cover set changed; a newer run carries on
+        const next = { ...coverColors.value }
+        batch.forEach((c, j) => { if (results[j]) next[c] = results[j]! })
+        coverColors.value = next
+      }
+    },
+    { immediate: true },
+  )
 
   function setAlbumSortOrder(order: AlbumSortOrder) {
     albumSortOrder.value = order

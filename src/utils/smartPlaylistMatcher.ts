@@ -1,7 +1,16 @@
-export function songKey(track: Track): string {
+import { splitCredits } from './credits'
+
+/**
+ * Stable identity of a song for play history, transitions and smart playlists.
+ * Feature credits are ignored, so "Kiss Me More (feat. SZA)" by "Doja Cat" and
+ * "Kiss Me More" by "Doja Cat & SZA" are the same song: it uses the first main
+ * artist and the title without "(feat. …)" / "(with …)".
+ */
+export function songKey(track: Pick<Track, 'title' | 'artist'> & { mbid?: string }): string {
   if (track.mbid) return `mbid:${track.mbid}`
-  const a = (track.artist || '').toLowerCase().trim().replace(/\s+/g, ' ')
-  const t = (track.title || '').toLowerCase().trim().replace(/\s+/g, ' ')
+  const { title, main } = splitCredits(track.title || '', track.artist || '')
+  const a = (main[0] ?? track.artist ?? '').toLowerCase().trim().replace(/\s+/g, ' ')
+  const t = title.toLowerCase().trim().replace(/\s+/g, ' ')
   return `norm:${a}||${t}`
 }
 

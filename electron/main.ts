@@ -1,5 +1,5 @@
 import { app, BrowserWindow, ipcMain, dialog, protocol, net, shell, screen, Menu, Tray, nativeImage } from 'electron'
-import { join, extname, basename, dirname } from 'path'
+import { join, extname, basename, dirname, sep } from 'path'
 import { readdir, readFile, writeFile, rename, mkdir, stat, rm, copyFile, unlink, appendFile } from 'fs/promises'
 import { existsSync, createReadStream, readFileSync, watch as fsWatch } from 'fs'
 import { createHash } from 'crypto'
@@ -18,6 +18,7 @@ import { startRemoteServer, stopRemoteServer, registerRemoteIPC, isRemoteEnabled
 import { registerAnimatedCoverIPC, getAlbumArtworkUrl } from './animated-covers'
 import { logger, installGlobalLogHandlers, initLogger, getLogPath } from './logger'
 import { getAppPaths } from './paths'
+import { splitCredits, formatArtists } from '../src/utils/credits'
 
 // Compute XDG-compliant paths and initialise the logger before anything else
 const appPaths = getAppPaths()
@@ -291,6 +292,8 @@ if (disabledFeatures.length > 0) {
 
 // ── Globals ────────────────────────────────────────────────────────────────
 let mainWindow: BrowserWindow | null = null
+/** Room lights: the pending Web Bluetooth device pick (see 'select-bluetooth-device') */
+let btPick: { callback: (deviceId: string) => void; timer: ReturnType<typeof setTimeout> } | null = null
 let isRelaunching = false
 let isQuitting = false // prevents before-quit re-entry after sync completes
 let tray: Tray | null = null
@@ -353,6 +356,34 @@ interface ArtistStreams {
   totalStreams: number
   dailyStreams: number
   songs: { title: string; streams: number; daily: number; feature: boolean }[]
+}
+
+// ── Official album tracklists (Apple's public iTunes catalog) ──────────────
+// Lets the album page show songs that aren't downloaded. Tracklists rarely
+// change, so hits are kept for 30 days; misses are retried after 3.
+interface CatalogTrack { title: string; disc: number; track: number; duration: number }
+interface AlbumTracklist { name: string; tracks: CatalogTrack[] }
+
+const tracklistCachePath = join(cachePath, 'album-tracklist-cache.json')
+const TRACKLIST_TTL = 30 * 24 * 60 * 60 * 1000
+const TRACKLIST_MISS_TTL = 3 * 24 * 60 * 60 * 1000
+let tracklistCache: Record<string, { data: AlbumTracklist | null; ts: number }> | null = null
+
+async function getTracklistCache() {
+  if (!tracklistCache) {
+    try {
+      tracklistCache = existsSync(tracklistCachePath) ? JSON.parse(await readFile(tracklistCachePath, 'utf-8')) : {}
+    } catch { tracklistCache = {} }
+  }
+  return tracklistCache!
+}
+
+/** "30 For 30 (with Kendrick Lamar)" and "30 for 30" compare equal */
+function normTitle(s: string): string {
+  return s.toLowerCase()
+    .replace(/[([](feat\.?|ft\.?|featuring|with)\s[^)\]]*[)\]]/g, '')
+    .replace(/\s+-\s+(single|ep)$/, '')
+    .replace(/[^\p{L}\p{N}]+/gu, '')
 }
 
 const streamsCachePath = join(cachePath, 'artist-streams-cache.json')
@@ -425,6 +456,28 @@ function scheduleWaveformFlush() {
     waveformFlushTimer = null
     try { await writeFile(waveformCachePath, JSON.stringify(waveformDiskCache)) } catch {}
   }, 5000)
+}
+
+// ── Beat grid disk cache (hand-made transitions editor) ────────────────────
+// Keyed by path; an entry only counts while the file's mtime and size match.
+const beatgridCachePath = join(cachePath, 'beatgrid-cache.json')
+let beatgridCache: Record<string, { mtimeMs: number; size: number; grid: any }> | null = null
+let beatgridFlushTimer: ReturnType<typeof setTimeout> | null = null
+
+async function getBeatgridCache() {
+  if (beatgridCache) return beatgridCache
+  try {
+    beatgridCache = existsSync(beatgridCachePath) ? JSON.parse(await readFile(beatgridCachePath, 'utf-8')) : {}
+  } catch { beatgridCache = {} }
+  return beatgridCache!
+}
+
+function scheduleBeatgridFlush() {
+  if (beatgridFlushTimer) return
+  beatgridFlushTimer = setTimeout(async () => {
+    beatgridFlushTimer = null
+    try { await writeFile(beatgridCachePath, JSON.stringify(beatgridCache)) } catch {}
+  }, 3000)
 }
 
 // ── In-memory library cache ────────────────────────────────────────────────
@@ -724,6 +777,52 @@ async function saveTags(): Promise<void> {
   await writeFile(tagsPath, JSON.stringify({ trackTags: trackTagsData, albumTags: albumTagsData }, null, 2))
 }
 
+// ── Hand-made transitions persistence ──────────────────────────────────────
+// User-authored song→song transitions, keyed by "fromSongKey→toSongKey".
+const transitionsPath = join(dataPath, 'transitions.json')
+let transitionsData: Record<string, any> = {}
+let transitionsLoaded = false
+
+async function loadTransitions(): Promise<Record<string, any>> {
+  if (transitionsLoaded) return transitionsData
+  try {
+    if (existsSync(transitionsPath)) {
+      const raw = JSON.parse(await readFile(transitionsPath, 'utf-8'))
+      transitionsData = raw.transitions || {}
+    }
+  } catch (err) {
+    logger.error('Failed to read transitions.json:', err)
+    transitionsData = {}
+    // Keep the unreadable file so hand-made work isn't lost to the next save
+    try { await rename(transitionsPath, `${transitionsPath}.corrupt-${Date.now()}`) } catch {}
+  }
+  transitionsLoaded = true
+  return transitionsData
+}
+
+// Hand-made work is expensive to redo, so write via a temp file + rename (serialised,
+// like settings, because concurrent saves would share the .tmp name)
+let _transitionsSaveQueue: Promise<void> = Promise.resolve()
+
+function saveTransitions(): Promise<void> {
+  const run = _transitionsSaveQueue.then(async () => {
+    const tmp = transitionsPath + '.tmp'
+    await writeFile(tmp, JSON.stringify({ version: 1, transitions: transitionsData }, null, 2))
+    await rename(tmp, transitionsPath)
+  })
+  // A failed write must not wedge every later one
+  _transitionsSaveQueue = run.catch(() => {})
+  return run
+}
+
+function isValidTransition(t: any): boolean {
+  const num = (v: any) => typeof v === 'number' && isFinite(v)
+  return !!t && typeof t.id === 'string'
+    && typeof t.from?.key === 'string' && typeof t.to?.key === 'string'
+    && ['blend', 'cut', 'echo-out'].includes(t.type)
+    && num(t.exitAt) && num(t.entryAt) && num(t.overlap)
+}
+
 // ── Playlist persistence ───────────────────────────────────────────────────
 interface TrackMetaSnapshot {
   title: string
@@ -818,13 +917,19 @@ async function parseTrack(filePath: string): Promise<any> {
       }
     }
 
+    // "Kiss Me More (feat. SZA)" by "Doja Cat" → "Kiss Me More" by "Doja Cat & SZA";
+    // featured artists are remembered so listening stats can weight them
+    const credits = splitCredits(metadata.common.title || basename(filePath, extname(filePath)), metadata.common.artist || '')
+    const mainArtists = formatArtists(credits.main)
+
     return {
       id,
       path: filePath,
-      title: metadata.common.title || basename(filePath, extname(filePath)),
-      artist: metadata.common.artist || 'Unknown Artist',
+      title: credits.title,
+      artist: formatArtists([...credits.main, ...credits.featured]) || 'Unknown Artist',
+      ...(credits.featured.length ? { featuredArtists: credits.featured } : {}),
       album: metadata.common.album || 'Unknown Album',
-      albumArtist: metadata.common.albumartist || metadata.common.artist || 'Unknown Artist',
+      albumArtist: metadata.common.albumartist || mainArtists || 'Unknown Artist',
       track: metadata.common.track?.no || 0,
       disc: metadata.common.disk?.no || 1,
       duration: metadata.format.duration && !isNaN(metadata.format.duration) ? Math.round(metadata.format.duration * 1000) / 1000 : 0,
@@ -882,10 +987,12 @@ function lrclibFetch(url: string): Promise<string> {
 
 async function fetchLRCLIB(track: { title: string; artist: string; album: string; duration: number }): Promise<string | null> {
   try {
+    // Lyrics sites list songs under the main artist, not "Doja Cat & SZA"
+    const artist = splitCredits(track.title, track.artist).main[0] || track.artist
     // Try exact match first
     const params = new URLSearchParams({
       track_name: track.title,
-      artist_name: track.artist,
+      artist_name: artist,
       album_name: track.album,
       duration: Math.round(track.duration).toString(),
     })
@@ -899,7 +1006,7 @@ async function fetchLRCLIB(track: { title: string; artist: string; album: string
     // Fallback: search
     const searchParams = new URLSearchParams({
       track_name: track.title,
-      artist_name: track.artist,
+      artist_name: artist,
     })
     const searchUrl = `https://lrclib.net/api/search?${searchParams.toString()}`
     const searchRes = await lrclibFetch(searchUrl)
@@ -1176,6 +1283,17 @@ async function createWindow() {
 
   // Prevent Ctrl+click / middle-click on router-links from opening a blank Electron window
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+
+  // Room lights: Web Bluetooth asks the app to pick a device. The renderer always asks for
+  // one bulb by exact name, so take the first match; give up if it isn't seen in time.
+  mainWindow.webContents.on('select-bluetooth-device', (event, devices, callback) => {
+    event.preventDefault()
+    if (btPick) clearTimeout(btPick.timer)
+    const done = (id: string) => { if (btPick?.callback === callback) { clearTimeout(btPick.timer); btPick = null } callback(id) }
+    if (devices.length) return done(devices[0].deviceId)
+    if (btPick?.callback !== callback) btPick = { callback, timer: setTimeout(() => done(''), 12000) }
+    else btPick.timer = setTimeout(() => done(''), 12000)
+  })
 
   // Forward renderer console logs to the log file
   mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
@@ -1542,6 +1660,17 @@ app.whenReady().then(async () => {
     for (const track of newTracks) {
       cache.trackMap.set(track.path, track)
     }
+
+    // Drop tracks under this folder whose files are gone (deleted, moved or renamed).
+    // Skipped when the folder itself is missing, e.g. an unplugged drive, so its
+    // tracks come back when it does instead of being wiped.
+    if (existsSync(folderPath)) {
+      const found = new Set(audioFiles)
+      const prefix = folderPath.endsWith(sep) ? folderPath : folderPath + sep
+      for (const path of [...cache.trackMap.keys()]) {
+        if (path.startsWith(prefix) && !found.has(path)) cache.trackMap.delete(path)
+      }
+    }
     cache.tracks = Array.from(cache.trackMap.values())
     rebuildIndexes()
     scheduleFlush()
@@ -1816,6 +1945,82 @@ app.whenReady().then(async () => {
     albumTagsData = merged.albumTags
     await saveTags()
     return { trackTags: trackTagsData, albumTags: albumTagsData }
+  })
+
+  // ── IPC: Transitions ──
+  ipcMain.handle('transitions:get', async () => await loadTransitions())
+  ipcMain.handle('transitions:save', async (_, t: any) => {
+    await loadTransitions()
+    if (!isValidTransition(t)) throw new Error('Invalid transition')
+    // A pair holds one transition; drop any older copy of this id (e.g. its songKey changed)
+    for (const [k, v] of Object.entries(transitionsData)) {
+      if (v?.id === t.id) delete transitionsData[k]
+    }
+    transitionsData[`${t.from.key}→${t.to.key}`] = t
+    await saveTransitions()
+    return transitionsData
+  })
+  ipcMain.handle('transitions:delete', async (_, id: string) => {
+    await loadTransitions()
+    for (const [k, v] of Object.entries(transitionsData)) {
+      if (v?.id === id) delete transitionsData[k]
+    }
+    await saveTransitions()
+    return transitionsData
+  })
+
+  // ── IPC: Beat grid cache ──
+  // ── Room lights ───────────────────────────────────────────────────────
+  // Web Bluetooth only connects inside a user gesture, so each bulb is requested through
+  // executeJavaScript with userGesture set (reconnects after that don't need one)
+  ipcMain.handle('lights:connect', async (_, names: string[]) => {
+    const results: Record<string, string> = {}
+    for (const name of names) {
+      try {
+        results[name] = await mainWindow!.webContents.executeJavaScript(
+          `window.__auroraLights ? window.__auroraLights.connectOne(${JSON.stringify(name)}) : 'not ready'`, true)
+      } catch (err) {
+        results[name] = String(err)
+      }
+    }
+    return results
+  })
+  // Chromium slows timers to about once a second (once a minute after a while) when the
+  // window is hidden or covered, which stalls the light show; keep them running while it's on
+  ipcMain.handle('lights:keep-running', (_, on: boolean) => {
+    mainWindow?.webContents.setBackgroundThrottling(!on)
+  })
+  // Keystone (localhost:8777): tells it Aurora has the lights, so it pauses "Match outside"
+  // and shows who's in control. From here rather than the renderer to avoid CORS.
+  ipcMain.handle('lights:keystone', async (_, action: string, body: any) => {
+    if (!['claim', 'update', 'release'].includes(action)) return { ok: false }
+    try {
+      const r = await fetch(`http://127.0.0.1:8777/api/aurora/${action}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}),
+        signal: AbortSignal.timeout(8000),
+      })
+      return await r.json()
+    } catch (err) {
+      return { ok: false, message: String(err) }
+    }
+  })
+
+  ipcMain.handle('beatgrid:get', async (_, filePath: string) => {
+    try {
+      const entry = (await getBeatgridCache())[filePath]
+      if (!entry) return null
+      const st = await stat(filePath)
+      return entry.mtimeMs === st.mtimeMs && entry.size === st.size ? entry.grid : null
+    } catch { return null }
+  })
+  ipcMain.handle('beatgrid:set', async (_, filePath: string, grid: any) => {
+    try {
+      const st = await stat(filePath)
+      ;(await getBeatgridCache())[filePath] = { mtimeMs: st.mtimeMs, size: st.size, grid }
+      scheduleBeatgridFlush()
+    } catch (err) {
+      logger.error('beatgrid:set failed:', err)
+    }
   })
 
   // ── IPC: Discord RPC ──
@@ -2597,6 +2802,56 @@ app.whenReady().then(async () => {
     }
   })
 
+  // ── IPC: Album tracklist (full official tracklist, to show missing songs) ──
+  // `localTitles` picks the right edition: the catalog album whose tracklist
+  // contains the most of the songs the user has wins.
+  ipcMain.handle('album:get-tracklist', async (_, album: string, artist: string, localTitles: string[] = []) => {
+    const cache = await getTracklistCache()
+    const key = `${normTitle(album)}|${normTitle(artist)}`
+    const hit = cache[key]
+    if (hit && Date.now() - hit.ts < (hit.data ? TRACKLIST_TTL : TRACKLIST_MISS_TTL)) return hit.data
+
+    try {
+      const search = JSON.parse(await fetchJSON(`https://itunes.apple.com/search?${new URLSearchParams({
+        term: `${album} ${artist}`, entity: 'album', limit: '25', country: 'US',
+      })}`)).results || []
+      const wantArtist = normTitle(artist.split(/,| & /)[0])
+      const wantAlbum = normTitle(album)
+      const candidates = search
+        .filter((a: any) => normTitle(a.artistName || '').includes(wantArtist))
+        // Same name first, then closest track count to what's on disk
+        .sort((a: any, b: any) => Number(normTitle(b.collectionName) === wantAlbum) - Number(normTitle(a.collectionName) === wantAlbum))
+        .slice(0, 5)
+
+      const local = new Set(localTitles.map(normTitle))
+      let best: { data: AlbumTracklist; score: number; matched: number } | null = null
+      for (const c of candidates) {
+        const songs = JSON.parse(await fetchJSON(`https://itunes.apple.com/lookup?id=${c.collectionId}&entity=song&country=US`)).results || []
+        const tracks: CatalogTrack[] = songs
+          .filter((s: any) => s.wrapperType === 'track')
+          .map((s: any) => ({ title: s.trackName, disc: s.discNumber || 1, track: s.trackNumber || 0, duration: (s.trackTimeMillis || 0) / 1000 }))
+          .sort((a: CatalogTrack, b: CatalogTrack) => a.disc - b.disc || a.track - b.track)
+        const matched = tracks.filter(t => local.has(normTitle(t.title))).length
+        const sameName = normTitle(c.collectionName) === wantAlbum
+        // Songs on disk count most; then the edition with the same name (one title spelt
+        // differently mustn't hand "Scarlet" to "Scarlet 2 CLAUDE"); then fewer extra tracks
+        const score = matched * 10 + (sameName ? 25 : 0) - (tracks.length - matched)
+        if (!best || score > best.score) best = { data: { name: c.collectionName, tracks }, score, matched }
+        if (matched === local.size && sameName) break
+      }
+
+      // Only trust it if it really is this album: most of the local songs must be on it
+      const needed = Math.max(1, Math.ceil(local.size / 2))
+      const data = best && best.matched >= needed ? best.data : null
+      cache[key] = { data, ts: Date.now() }
+      writeFile(tracklistCachePath, JSON.stringify(cache)).catch(() => {})
+      return data
+    } catch (err) {
+      logger.error('Album tracklist fetch error:', err)
+      return hit?.data ?? null
+    }
+  })
+
   // ── IPC: Artist releases (Deezer discography, newest first) ──
   // Kept separate from artist:get-info so new releases show up within hours
   // rather than waiting out the 7-day artist info cache.
@@ -2795,6 +3050,14 @@ app.whenReady().then(async () => {
         if (existsSync(waveformCachePath)) await rm(waveformCachePath)
         results.waveform = true
       } catch { results.waveform = false }
+    }
+
+    if (targets.includes('beatgrid')) {
+      try {
+        beatgridCache = {}
+        if (existsSync(beatgridCachePath)) await rm(beatgridCachePath)
+        results.beatgrid = true
+      } catch { results.beatgrid = false }
     }
 
     return results

@@ -190,6 +190,7 @@ const albumSortOptions: { value: AlbumSortOrder; label: string }[] = [
   { value: 'artist', label: 'Artist' },
   { value: 'year', label: 'Year' },
   { value: 'tracks', label: 'Track Count' },
+  { value: 'color', label: 'Cover Color' },
 ]
 
 const albumSortLabels: Record<AlbumSortOrder, string> = {
@@ -197,6 +198,7 @@ const albumSortLabels: Record<AlbumSortOrder, string> = {
   artist: 'Artist',
   year: 'Year',
   tracks: 'Track Count',
+  color: 'Cover Color',
 }
 
 function selectSort(order: string) {

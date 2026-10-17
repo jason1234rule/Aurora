@@ -26,7 +26,8 @@
         <div class="flex items-center gap-3 text-sm text-white/40">
           <span v-if="album.year" class="cursor-pointer hover:text-accent transition-colors" @click="goToYear">{{ album.year }}</span>
           <span v-if="album.year">&bull;</span>
-          <span>{{ album.tracks.length }} songs</span>
+          <span v-if="tracklist && missingCount > 0">{{ album.tracks.length }} of {{ tracklist.tracks.length }} songs</span>
+          <span v-else>{{ album.tracks.length }} songs</span>
           <span>&bull;</span>
           <span>{{ totalDuration }}</span>
         </div>
@@ -62,18 +63,48 @@
       </div>
     </div>
 
-    <!-- Track list -->
+    <!-- Track list: the official tracklist when known, with songs that aren't downloaded greyed out -->
+    <div v-if="missingCount > 0" class="flex justify-end mb-2">
+      <button
+        @click="setShowMissing(!showMissing)"
+        class="text-xs text-white/40 hover:text-white/70 transition-colors"
+      >
+        {{ showMissing ? 'Hide' : 'Show' }} {{ missingCount }} {{ missingCount === 1 ? 'song' : 'songs' }} not downloaded
+      </button>
+    </div>
     <div class="space-y-0.5">
-      <SongRow
-        v-for="(track, i) in album.tracks"
-        :key="track.id"
-        :track="track"
-        :index="i"
-        :selected="selection.isSelected(track.id)"
-        :selectable="selection.hasSelection.value"
-        @play="selection.hasSelection.value ? selection.handleSelect(i, $event ?? { ctrlKey: true, metaKey: false, shiftKey: false }) : player.playAll(album.tracks, i)"
-        @select="selection.handleSelect(i, $event)"
-      />
+      <template v-for="row in rows" :key="row.key">
+        <SongRow
+          v-if="row.local"
+          :track="row.local"
+          :index="row.number - 1"
+          :selected="selection.isSelected(row.local.id)"
+          :selectable="selection.hasSelection.value"
+          @play="selection.hasSelection.value ? selection.handleSelect(row.localIndex, $event ?? { ctrlKey: true, metaKey: false, shiftKey: false }) : player.playAll(album.tracks, row.localIndex)"
+          @select="selection.handleSelect(row.localIndex, $event)"
+        />
+        <div
+          v-else
+          class="flex items-center gap-3 px-4 rounded-lg select-none cursor-default"
+          style="height: 56px;"
+          title="Not downloaded"
+        >
+          <div class="w-8 text-center shrink-0 text-xs text-white/20">{{ row.number }}</div>
+          <div class="w-10 h-10 rounded-md border border-dashed border-white/[0.12] shrink-0" />
+          <div class="flex-1 min-w-0">
+            <p class="text-sm truncate text-white/30">{{ row.title }}</p>
+            <p class="text-xs text-white/20">Not downloaded</p>
+          </div>
+          <div class="w-48 min-w-0 hidden lg:block">
+            <p class="text-xs text-white/20 truncate">{{ album.name }}</p>
+          </div>
+          <div class="w-14 text-right shrink-0">
+            <span class="text-xs text-white/20 tabular-nums">{{ formatTime(row.duration) }}</span>
+          </div>
+          <div class="w-7 shrink-0" />
+          <div class="w-7 shrink-0" />
+        </div>
+      </template>
     </div>
 
     <!-- Selection action bar -->
@@ -112,6 +143,86 @@ const selection = useSelection(() => album.value?.tracks ?? [])
 
 const coverUrl = computed(() =>
   album.value?.coverArt ? window.api.getMediaUrl(album.value.coverArt) : '',
+)
+
+// ── Full official tracklist (songs that aren't downloaded) ─────────────────
+const tracklist = ref<AlbumTracklist | null>(null)
+
+const SHOW_MISSING_KEY = 'aurora-album-show-missing'
+const showMissing = ref(true)
+try { showMissing.value = localStorage.getItem(SHOW_MISSING_KEY) !== '0' } catch { /* storage unavailable */ }
+function setShowMissing(show: boolean) {
+  showMissing.value = show
+  try { localStorage.setItem(SHOW_MISSING_KEY, show ? '1' : '0') } catch { /* storage unavailable */ }
+}
+
+/** Same rules as the main process, so "30 For 30 (with Kendrick Lamar)" matches "30 for 30" */
+const normTitle = (s: string) => s.toLowerCase()
+  .replace(/[([](feat\.?|ft\.?|featuring|with)\s[^)\]]*[)\]]/g, '')
+  .replace(/[^\p{L}\p{N}]+/gu, '')
+
+interface Row { key: string; number: number; title: string; duration: number; local?: Track; localIndex: number }
+
+/** Catalog order with local tracks slotted in; local tracks the catalog doesn't list go last */
+const merged = computed(() => {
+  const a = album.value
+  if (!a) return { rows: [] as Row[], missing: 0 }
+  const tl = tracklist.value
+  if (!tl) {
+    return { rows: a.tracks.map((t, i) => ({ key: t.id, number: i + 1, title: t.title, duration: t.duration, local: t, localIndex: i })), missing: 0 }
+  }
+  const byTitle = new Map<string, number[]>()
+  a.tracks.forEach((t, i) => {
+    const k = normTitle(t.title)
+    byTitle.set(k, [...(byTitle.get(k) ?? []), i])
+  })
+  const used = new Set<number>()
+  const multiDisc = new Set(tl.tracks.map(t => t.disc)).size > 1
+  const rows: Row[] = []
+  let missing = 0
+  // A title spelt differently (censored, re-punctuated) still matches on same slot and length
+  const bySlot = (c: AlbumTracklist['tracks'][number]) => a.tracks.findIndex((t, i) =>
+    !used.has(i) && t.track === c.track && (t.disc || 1) === c.disc && Math.abs(t.duration - c.duration) < 3)
+  tl.tracks.forEach((c, ci) => {
+    const number = multiDisc ? ci + 1 : c.track || ci + 1
+    let li: number | undefined = (byTitle.get(normTitle(c.title)) ?? []).find(i => !used.has(i))
+    if (li === undefined && c.track) li = bySlot(c) >= 0 ? bySlot(c) : undefined
+    if (li !== undefined) {
+      used.add(li)
+      rows.push({ key: a.tracks[li].id, number, title: a.tracks[li].title, duration: a.tracks[li].duration, local: a.tracks[li], localIndex: li })
+    } else {
+      missing++
+      rows.push({ key: `missing-${ci}`, number, title: c.title, duration: c.duration, localIndex: -1 })
+    }
+  })
+  a.tracks.forEach((t, i) => {
+    if (!used.has(i)) rows.push({ key: t.id, number: rows.length + 1, title: t.title, duration: t.duration, local: t, localIndex: i })
+  })
+  return { rows, missing }
+})
+
+const missingCount = computed(() => merged.value.missing)
+const rows = computed(() => (showMissing.value ? merged.value.rows : merged.value.rows.filter(r => r.local)))
+
+function formatTime(seconds: number) {
+  const s = Math.round(seconds)
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+}
+
+watch(
+  () => album.value?.id,
+  async () => {
+    tracklist.value = null
+    const a = album.value
+    // Remote (Navidrome) albums are complete already; only local folders can be partial
+    if (!a || a.tracks.some(t => t.source === 'subsonic')) return
+    const id = a.id
+    try {
+      const tl = await window.api.getAlbumTracklist(a.name, a.artist, a.tracks.map(t => t.title))
+      if (album.value?.id === id) tracklist.value = tl
+    } catch { /* offline: just show what's on disk */ }
+  },
+  { immediate: true },
 )
 
 // ── Animated cover (HLS stream) ─────────────────────────────────────────

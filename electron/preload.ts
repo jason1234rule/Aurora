@@ -65,6 +65,16 @@ contextBridge.exposeInMainWorld('api', {
   removeAlbumTags: (albumKeys: string[], tagsToRemove: string[]): Promise<{ trackTags: Record<string, string[]>; albumTags: Record<string, string[]> }> => ipcRenderer.invoke('tags:remove-album-tags', albumKeys, tagsToRemove),
   applyTagsSync: (merged: { trackTags: Record<string, string[]>; albumTags: Record<string, string[]> }): Promise<{ trackTags: Record<string, string[]>; albumTags: Record<string, string[]> }> => ipcRenderer.invoke('tags:apply-sync', merged),
 
+  // Hand-made transitions
+  getTransitions: () => ipcRenderer.invoke('transitions:get'),
+  saveTransition: (transition: any) => ipcRenderer.invoke('transitions:save', transition),
+  deleteTransition: (id: string) => ipcRenderer.invoke('transitions:delete', id),
+  getBeatGrid: (filePath: string) => ipcRenderer.invoke('beatgrid:get', filePath),
+  lightsConnect: (names: string[]) => ipcRenderer.invoke('lights:connect', names),
+  lightsKeepRunning: (on: boolean) => ipcRenderer.invoke('lights:keep-running', on),
+  lightsKeystone: (action: 'claim' | 'update' | 'release', body?: any) => ipcRenderer.invoke('lights:keystone', action, body),
+  saveBeatGrid: (filePath: string, grid: any) => ipcRenderer.invoke('beatgrid:set', filePath, grid),
+
   // Discord RPC
   updateDiscordPresence: (data: any) => ipcRenderer.invoke('discord:update-presence', data),
   toggleDiscordRPC: (enabled: boolean, clientId?: string) => ipcRenderer.invoke('discord:toggle', enabled, clientId),
@@ -101,6 +111,7 @@ contextBridge.exposeInMainWorld('api', {
   getArtistInfo: (artistName: string, forceRefresh = false) => ipcRenderer.invoke('artist:get-info', artistName, forceRefresh),
   getArtistReleases: (artistName: string, forceRefresh = false) => ipcRenderer.invoke('artist:get-releases', artistName, forceRefresh),
   getArtistStreams: (artistName: string, forceRefresh = false) => ipcRenderer.invoke('artist:get-streams', artistName, forceRefresh),
+  getAlbumTracklist: (album: string, artist: string, localTitles: string[]) => ipcRenderer.invoke('album:get-tracklist', album, artist, localTitles),
 
   // Folder tree
   getFolderTree: (folderPath: string) => ipcRenderer.invoke('folder:get-tree', folderPath),

@@ -22,7 +22,7 @@
 
       <main class="flex-1 overflow-y-auto overflow-x-hidden">
         <router-view v-slot="{ Component }">
-          <keep-alive :max="5" :exclude="['FullscreenView', 'MiniPlayerView']">
+          <keep-alive :max="5" :exclude="['FullscreenView', 'MiniPlayerView', 'TransitionEditorView']">
             <component :is="Component" :key="$route.path" />
           </keep-alive>
         </router-view>
@@ -30,7 +30,12 @@
     </div>
 
     <!-- Bottom player bar -->
-    <PlayerBar v-if="player.currentTrack && !isFullscreen && !isMini" />
+    <PlayerBar
+      v-if="player.currentTrack && !isFullscreen && !isMini"
+      :inert="player.controlsLocked || undefined"
+      :class="player.controlsLocked ? 'opacity-40 grayscale pointer-events-none select-none' : ''"
+      :title="player.controlsLocked ? 'The transition editor is using playback' : undefined"
+    />
 
     <!-- First-time setup wizard -->
     <SetupWizard v-if="showSetupWizard" @complete="showSetupWizard = false" />
@@ -56,6 +61,9 @@ import { useThemeStore } from '@/stores/theme'
 import { usePluginStore } from '@/stores/plugins'
 import { useStatsStore } from '@/stores/stats'
 import { useSyncStore } from '@/stores/sync'
+import { useTransitionsStore } from '@/stores/transitions'
+import { useLightsStore } from '@/stores/lights'
+import { installTransitionDevHook } from '@/utils/transitions/devHook'
 import Titlebar from '@/components/Titlebar.vue'
 import Sidebar from '@/components/Sidebar.vue'
 import PlayerBar from '@/components/PlayerBar.vue'
@@ -74,6 +82,7 @@ const themeStore = useThemeStore()
 const pluginStore = usePluginStore()
 const statsStore = useStatsStore()
 const syncStore = useSyncStore()
+const transitionsStore = useTransitionsStore()
 const { focusSearch } = useSearchFocus()
 
 // Expose stores globally for cross-store lazy access (avoids circular require issues)
@@ -120,6 +129,8 @@ onMounted(async () => {
 
   // Load stats (non-blocking)
   statsStore.loadStats()
+  // Room lights (only does anything once turned on in Settings)
+  useLightsStore().init()
 
   // Load saved settings
   const settings = await window.api.getSettings()
@@ -141,6 +152,11 @@ onMounted(async () => {
   await playlistStore.loadPlaylists()
   await favoritesStore.load()
   await tagsStore.load()
+  await transitionsStore.load()
+
+  let devFlag = false
+  try { devFlag = localStorage.getItem('aurora-dev') === '1' } catch { /* storage unavailable */ }
+  if (import.meta.env.DEV || devFlag) installTransitionDevHook()
 
   if (settings.autoTagAlbumsFromApi === true) {
     tagsStore.autoTagAlbumsFromFetchedData().catch(() => {})
@@ -387,6 +403,8 @@ function onGlobalKeydown(e: KeyboardEvent) {
 
   // Don't intercept in fullscreen view (it has its own handler)
   if (route.path === '/fullscreen') return
+  // The transition editor owns playback while it's open
+  if (player.controlsLocked) return
 
   switch (e.key) {
     case ' ':

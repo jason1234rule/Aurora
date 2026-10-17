@@ -152,6 +152,16 @@
           Play Later
         </button>
         <button
+          v-if="isLocalTrack"
+          @click.stop="openTransitionPicker"
+          class="ctx-item w-full px-3.5 py-2 text-left text-sm transition-colors flex items-center gap-2.5"
+        >
+          <svg class="w-4 h-4 shrink-0 opacity-50" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M7.5 21L3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" />
+          </svg>
+          Create Transition To…
+        </button>
+        <button
           @click.stop="toggleFavorite"
           class="ctx-item w-full px-3.5 py-2 text-left text-sm transition-colors flex items-center gap-2.5"
         >
@@ -174,6 +184,7 @@
           Go to Artist
         </button>
         <button
+          v-if="!onOwnAlbumPage"
           @click.stop="goToAlbum"
           class="ctx-item w-full px-3.5 py-2 text-left text-sm transition-colors flex items-center gap-2.5"
         >
@@ -283,6 +294,14 @@
         </template>
       </div>
     </Teleport>
+
+    <TrackPickerDialog
+      v-if="showTransitionPicker"
+      :show="showTransitionPicker"
+      :from="track"
+      @close="showTransitionPicker = false"
+      @pick="onPickTransitionTarget"
+    />
 
     <!-- Tag Dialog -->
     <TagDialog
@@ -432,6 +451,7 @@ import PlaylistSubmenu from '@/components/PlaylistSubmenu.vue'
 import { pluginContextMenuItems } from '@/plugins/api'
 import type { PluginContextMenuItem } from '@/types/plugin'
 import TagDialog from '@/components/TagDialog.vue'
+import TrackPickerDialog from '@/components/transitions/TrackPickerDialog.vue'
 
 const props = defineProps<{
   track: Track
@@ -476,7 +496,7 @@ function openMenu() {
 function openContextMenu(e: MouseEvent) {
   showCtx.value = false
   showMenu.value = false
-  ctxPos.value = menuPosition(e.clientX, e.clientY, 220, 360)
+  ctxPos.value = menuPosition(e.clientX, e.clientY, 220, 400)
   showCtx.value = true
 }
 
@@ -488,6 +508,23 @@ function doPlayNext() {
 function doPlayLater() {
   player.playLater(props.track)
   showCtx.value = false
+}
+
+// ── Hand-made transitions ───────────────────────────────────
+const showTransitionPicker = ref(false)
+const isLocalTrack = computed(() =>
+  props.track.source !== 'subsonic' && (props.track.path.startsWith('/') || /^[a-zA-Z]:[/\\]/.test(props.track.path)),
+)
+
+function openTransitionPicker() {
+  showCtx.value = false
+  // Same click-through guard as the tag dialog below
+  setTimeout(() => { showTransitionPicker.value = true }, 80)
+}
+
+function onPickTransitionTarget(to: Track) {
+  showTransitionPicker.value = false
+  router.push({ path: '/transition/edit', query: { from: props.track.id, to: to.id } })
 }
 
 async function toggleFavorite() {
@@ -512,13 +549,19 @@ function goToArtist() {
   router.push(`/artist/${encodeURIComponent(artistName)}`)
 }
 
+const trackAlbum = computed(() => library.albums.find(a =>
+  a.name === props.track.album && a.artist === (props.track.albumArtist || props.track.artist)
+))
+
+/** Already looking at this track's album, so "Go to Album" would go nowhere */
+const onOwnAlbumPage = computed(() =>
+  !!trackAlbum.value && router.currentRoute.value.path === `/album/${trackAlbum.value.id}`
+)
+
 function goToAlbum() {
   showCtx.value = false
-  const album = library.albums.find(a =>
-    a.name === props.track.album && a.artist === (props.track.albumArtist || props.track.artist)
-  )
-  if (album) {
-    router.push(`/album/${album.id}`)
+  if (trackAlbum.value) {
+    router.push(`/album/${trackAlbum.value.id}`)
   }
 }
 

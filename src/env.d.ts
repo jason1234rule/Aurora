@@ -13,6 +13,8 @@ interface Track {
   path: string
   title: string
   artist: string
+  /** Artists credited as "feat." (they're also in `artist`); weighted lower in listening stats */
+  featuredArtists?: string[]
   album: string
   albumArtist: string
   track: number
@@ -90,6 +92,13 @@ interface ArtistInfo {
   fans?: number
   /** Spotify artist ID from MusicBrainz ('' when unknown) */
   spotifyId?: string
+}
+
+/** An album's full official tracklist (Apple's public catalog), for showing songs that aren't downloaded */
+interface AlbumTracklist {
+  /** The catalog's name for the album */
+  name: string
+  tracks: { title: string; disc: number; track: number; duration: number }[]
 }
 
 /** Spotify stream counts scraped from kworb.net */
@@ -200,6 +209,18 @@ interface Window {
     removeTrackTags: (ids: string[], tagsToRemove: string[]) => Promise<{ trackTags: Record<string, string[]>; albumTags: Record<string, string[]> }>
     removeAlbumTags: (albumKeys: string[], tagsToRemove: string[]) => Promise<{ trackTags: Record<string, string[]>; albumTags: Record<string, string[]> }>
     applyTagsSync: (merged: { trackTags: Record<string, string[]>; albumTags: Record<string, string[]> }) => Promise<{ trackTags: Record<string, string[]>; albumTags: Record<string, string[]> }>
+    // Hand-made transitions (keyed by "fromSongKey→toSongKey")
+    getTransitions: () => Promise<Record<string, import('@/types/transition').Transition>>
+    saveTransition: (transition: import('@/types/transition').Transition) => Promise<Record<string, import('@/types/transition').Transition>>
+    deleteTransition: (id: string) => Promise<Record<string, import('@/types/transition').Transition>>
+    /** Cached beat grid for a file, or null if missing or the file changed since */
+    getBeatGrid: (filePath: string) => Promise<import('@/types/transition').BeatGrid | null>
+    /** Connect room-light bulbs over Bluetooth by name; result per name ('ok' or an error) */
+    lightsConnect: (names: string[]) => Promise<Record<string, string>>
+    lightsKeystone: (action: 'claim' | 'update' | 'release', body?: any) => Promise<any>
+    /** Stop Chromium throttling timers while the window is hidden (the light show needs them) */
+    lightsKeepRunning: (on: boolean) => Promise<void>
+    saveBeatGrid: (filePath: string, grid: import('@/types/transition').BeatGrid) => Promise<void>
     updateDiscordPresence: (data: any) => Promise<void>
     toggleDiscordRPC: (enabled: boolean, clientId?: string) => Promise<void>
     setTrayEnabled: (enabled: boolean) => Promise<void>
@@ -223,6 +244,7 @@ interface Window {
     getArtistInfo: (artistName: string, forceRefresh?: boolean) => Promise<ArtistInfo | null>
     getArtistReleases: (artistName: string, forceRefresh?: boolean) => Promise<ArtistRelease[]>
     getArtistStreams: (artistName: string, forceRefresh?: boolean) => Promise<ArtistStreams | null>
+    getAlbumTracklist: (album: string, artist: string, localTitles: string[]) => Promise<AlbumTracklist | null>
     // Folder structure
     getFolderTree: (folderPath: string) => Promise<FolderEntry[]>
     // Scrobbling
