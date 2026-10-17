@@ -20,7 +20,7 @@ describe('Govee packets', () => {
   it('send the colour command each model uses (both for unknown models)', () => {
     expect(colourPackets([1, 2, 3], 'ihoment_H6006_9075').map(p => p[2])).toEqual([0x0d])
     expect(colourPackets([1, 2, 3], 'Govee_H6076_218E').map(p => p[2])).toEqual([0x02, 0x0d])
-    expect(colourPackets([1, 2, 3], 'ihoment_H6008_3B85').map(p => p[2])).toEqual([0x02])
+    expect(colourPackets([1, 2, 3], 'ihoment_H6008_3B85').map(p => p[2])).toEqual([0x0d])
   })
 })
 

@@ -23,13 +23,12 @@ export function packet(...bytes: number[]): Uint8Array<ArrayBuffer> {
 }
 
 /**
- * The colour packets for a bulb, by model (each tested on its own): H6008s use the 0x02
- * form, H6006s only 0x0D. Unknown models get both. One packet matters: the bulbs share the
- * Mac's Bluetooth radio with headphones, and H6006s drop off when sent the form they ignore.
+ * The colour packets for a bulb, by model. H6008 and H6006 bulbs only act on the 0x0D form
+ * (sent alone, 0x02 left them unchanged). Unknown models get both. One packet matters: the
+ * bulbs share the Mac's Bluetooth radio with headphones.
  */
 export function colourPackets([r, g, b]: RGB, name = ''): Uint8Array<ArrayBuffer>[] {
-  if (/H6008/i.test(name)) return [packet(0x33, 0x05, 0x02, r, g, b)]
-  if (/H6006/i.test(name)) return [packet(0x33, 0x05, 0x0d, r, g, b)]
+  if (/H600[68]/i.test(name)) return [packet(0x33, 0x05, 0x0d, r, g, b)]
   return [packet(0x33, 0x05, 0x02, r, g, b), packet(0x33, 0x05, 0x0d, r, g, b)]
 }
 export const powerPacket = (on: boolean) => packet(0x33, 0x01, on ? 1 : 0)
