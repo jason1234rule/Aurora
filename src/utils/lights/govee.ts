@@ -34,10 +34,19 @@ interface Bulb {
   device: BluetoothDevice
   char: BluetoothRemoteGATTCharacteristic | null
   busy: boolean
-  /** Latest colour waiting to go out while a write is in flight */
+  /** Latest colour waiting to go out (a write is in flight, or it's too soon after the last) */
   queued: RGB | null
+  queuedTimer: ReturnType<typeof setTimeout> | null
+  lastWrite: number
   reconnecting: boolean
 }
+
+/**
+ * Bulbs drop the connection when flooded. These were measured fine (8 colour changes a
+ * second per bulb); a beat hit may go out sooner after a fade step so it lands on time.
+ */
+const MIN_GAP_MS = 120
+const BEAT_GAP_MS = 50
 
 const bulbs = new Map<string, Bulb>()
 let keepAliveTimer: ReturnType<typeof setInterval> | null = null
@@ -62,12 +71,13 @@ async function reconnect(b: Bulb) {
   b.reconnecting = true
   b.char = null
   changed()
-  for (let attempt = 0; attempt < 5 && bulbs.has(b.name); attempt++) {
+  // Keep trying while the bulb is wanted (it may just be out of range for a while)
+  for (let attempt = 0; bulbs.has(b.name); attempt++) {
     try {
       await attach(b)
       break
     } catch {
-      await new Promise(r => setTimeout(r, 1500 * (attempt + 1)))
+      await new Promise(r => setTimeout(r, Math.min(10000, 1500 * (attempt + 1))))
     }
   }
   b.reconnecting = false
@@ -83,7 +93,7 @@ async function connectOne(name: string): Promise<string> {
       filters: [{ name }],
       optionalServices: [GOVEE_SERVICE],
     })
-    const b: Bulb = existing ?? { name, device, char: null, busy: false, queued: null, reconnecting: false }
+    const b: Bulb = existing ?? { name, device, char: null, busy: false, queued: null, queuedTimer: null, lastWrite: 0, reconnecting: false }
     if (!existing) {
       bulbs.set(name, b)
       device.addEventListener('gattserverdisconnected', () => { reconnect(b) })
@@ -98,29 +108,49 @@ async function connectOne(name: string): Promise<string> {
 }
 
 function keepAlive() {
+  const now = performance.now()
   for (const b of bulbs.values()) {
-    if (b.char && !b.busy) write(b, keepAlivePacket()).catch(() => {})
+    // Colour writes keep the connection alive too; only idle bulbs need this
+    if (b.char && !b.busy && now - b.lastWrite > 1500) write(b, keepAlivePacket()).catch(() => {})
   }
 }
 
 /**
- * Set a bulb's colour. Writes never pile up: while one is in flight only the newest colour
- * is kept, so a slow bulb skips frames instead of falling behind.
+ * Set a bulb's colour. Writes never pile up and are spaced out (see MIN_GAP_MS): in between,
+ * only the newest colour is kept, so a busy bulb skips frames instead of falling behind.
+ * `beat` marks a hit that should go out as soon as the bulb can take it.
  */
-export function setColour(name: string, rgb: RGB) {
+export function setColour(name: string, rgb: RGB, beat = false) {
   const b = bulbs.get(name)
   if (!b?.char) return
-  if (b.busy) { b.queued = rgb; return }
-  b.busy = true
-  const send = async (c: RGB) => {
-    try {
-      for (const p of colourPackets(c)) await write(b, p)
-    } catch { /* a dropped write is fine: the next frame replaces it */ }
-    const next = b.queued
-    b.queued = null
-    if (next) await send(next)
+  b.queued = rgb
+  const wait = b.lastWrite + (beat ? BEAT_GAP_MS : MIN_GAP_MS) - performance.now()
+  if (b.busy) return
+  if (wait > 0) {
+    if (b.queuedTimer) clearTimeout(b.queuedTimer)
+    b.queuedTimer = setTimeout(() => { b.queuedTimer = null; flush(b) }, wait)
+    return
   }
-  send(rgb).finally(() => { b.busy = false })
+  flush(b)
+}
+
+async function flush(b: Bulb) {
+  const c = b.queued
+  if (!c || b.busy || !b.char) return
+  if (b.queuedTimer) { clearTimeout(b.queuedTimer); b.queuedTimer = null }
+  b.queued = null
+  b.busy = true
+  b.lastWrite = performance.now()
+  try {
+    for (const p of colourPackets(c)) await write(b, p)
+  } catch { /* a dropped write is fine: the next frame replaces it */ }
+  b.busy = false
+  if (b.queued) b.queuedTimer = setTimeout(() => { b.queuedTimer = null; flush(b) }, MIN_GAP_MS)
+}
+
+/** Bulbs Aurora has found (connected or reconnecting): these never need requesting again */
+export function knownNames(): string[] {
+  return [...bulbs.keys()]
 }
 
 export function connectedNames(): string[] {

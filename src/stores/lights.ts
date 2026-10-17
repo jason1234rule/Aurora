@@ -15,7 +15,7 @@ import { usePlayerStore } from './player'
 import { coverPalette } from '@/utils/coverColor'
 import { getBeatGrid } from '@/utils/transitions/analysis'
 import { frame, usableGrid, beatPosition, WARM_WHITE, type LightIntensity } from '@/utils/lights/show'
-import { setColour, connectedNames, onBulbsChange, disconnectAll, type RGB } from '@/utils/lights/govee'
+import { setColour, connectedNames, knownNames, onBulbsChange, disconnectAll, type RGB } from '@/utils/lights/govee'
 import type { BeatGrid } from '@/types/transition'
 
 export interface LightBulb {
@@ -112,9 +112,9 @@ export const useLightsStore = defineStore('lights', () => {
   }
 
   function save() {
-    window.api.mergeSettings({
-      roomLights: { enabled: enabled.value, bulbs: bulbs.value, intensity: intensity.value, offsetMs: offsetMs.value },
-    })
+    // Plain copy: IPC can't clone Vue's reactive proxies
+    const roomLights = JSON.parse(JSON.stringify({ enabled: enabled.value, bulbs: bulbs.value, intensity: intensity.value, offsetMs: offsetMs.value }))
+    window.api.mergeSettings({ roomLights }).catch((err: unknown) => console.warn('[Lights] Couldn\'t save settings:', err))
   }
 
   function setEnabled(on: boolean) {
@@ -138,7 +138,8 @@ export const useLightsStore = defineStore('lights', () => {
   let connecting: Promise<void> | null = null
   function connect(): Promise<void> {
     if (connecting) return connecting
-    const missing = activeBulbs.value.map(b => b.name).filter(n => !connectedNames().includes(n))
+    // Bulbs found before reconnect on their own; only never-found ones need requesting
+    const missing = activeBulbs.value.map(b => b.name).filter(n => !knownNames().includes(n))
     if (!missing.length) { status.value = 'on'; return Promise.resolve() }
     status.value = 'connecting'
     statusText.value = `Connecting to ${missing.length} light${missing.length > 1 ? 's' : ''}…`
@@ -233,7 +234,7 @@ export const useLightsStore = defineStore('lights', () => {
     restingSent = false
     if (!claimed) claim()
     else heartbeat()
-    if (connected.value.length < activeBulbs.value.length && !connecting && status.value !== 'error') connect()
+    if (!connecting && status.value !== 'error' && activeBulbs.value.some(b => !knownNames().includes(b.name))) connect()
 
     const track = clock.track
     if (track.path !== lastTrackPath) {
@@ -268,7 +269,7 @@ export const useLightsStore = defineStore('lights', () => {
     const prev = lastSent.get(name)
     if (!force && prev && Math.abs(prev[0] - rgb[0]) + Math.abs(prev[1] - rgb[1]) + Math.abs(prev[2] - rgb[2]) < 18) return
     lastSent.set(name, rgb)
-    setColour(name, rgb)
+    setColour(name, rgb, force)
   }
 
   return {
