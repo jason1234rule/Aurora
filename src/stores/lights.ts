@@ -49,7 +49,9 @@ const HEARTBEAT_MS = 10000
  * it the lights run this far ahead of what you hear
  */
 const BLUETOOTH_AUDIO_DELAY = 0.2
-const TIMING_TEST_MS = 15000
+/** The timing test plays its own beat: a kick and click at this tempo, accent on each bar */
+const TEST_BPM = 120
+const TEST_BEATS = 32
 
 type Status = 'off' | 'connecting' | 'on' | 'error'
 
@@ -66,7 +68,7 @@ export const useLightsStore = defineStore('lights', () => {
   /** Name of the Bluetooth headphones audio is going to, if any (their delay is allowed for) */
   const bluetoothOutput = ref('')
   const testing = ref(false)
-  let testUntil = 0
+  let test: { ctx: AudioContext; start: number; resume: boolean } | null = null
 
   const activeBulbs = computed(() => bulbs.value.filter(b => b.on))
 
@@ -162,11 +164,81 @@ export const useLightsStore = defineStore('lights', () => {
     }
   }
 
-  /** Bright white on every beat, dark in between, so early or late is easy to see */
-  function timingTest() {
-    testUntil = performance.now() + TIMING_TEST_MS
+  /**
+   * Timing test: pauses the music and plays a plain beat (kick + click, 120 BPM) through the
+   * same output, while the lights flash white on each beat and go dark in between. Any
+   * early/late is then easy to see. Music resumes afterwards if it was playing.
+   */
+  async function timingTest() {
+    if (test || !enabled.value) return
+    const player = usePlayerStore()
+    const resume = player.isPlaying
+    if (resume) player.pause()
+    const ctx = new AudioContext({ latencyHint: 'interactive' })
+    const sink = player.outputDeviceId
+    if (sink && sink !== 'default') {
+      try { await (ctx as AudioContext & { setSinkId(id: string): Promise<void> }).setSinkId(sink) } catch { /* default output */ }
+    }
+    const period = 60 / TEST_BPM
+    const t0 = ctx.currentTime + 0.8
+    for (let i = 0; i < TEST_BEATS; i++) beatSound(ctx, t0 + i * period, i % 4 === 0)
+    test = { ctx, start: t0, resume }
     testing.value = true
-    setTimeout(() => { if (performance.now() >= testUntil) testing.value = false }, TIMING_TEST_MS + 50)
+    if (!timer) start()
+    setTimeout(endTest, (0.8 + TEST_BEATS * period) * 1000 + 400)
+  }
+
+  function endTest() {
+    if (!test) return
+    const { ctx, resume } = test
+    test = null
+    testing.value = false
+    ctx.close().catch(() => {})
+    lastSent.clear()
+    lastBeat = -1
+    // The pause timers start over: the test isn't the user walking away
+    pausedAt = 0
+    restingSent = false
+    if (resume) usePlayerStore().play()
+  }
+
+  /** A short kick (sine sweeping down) with a click on top, so the beat is obvious */
+  function beatSound(ctx: AudioContext, at: number, accent: boolean) {
+    const kick = ctx.createOscillator(), kg = ctx.createGain()
+    kick.frequency.setValueAtTime(accent ? 180 : 140, at)
+    kick.frequency.exponentialRampToValueAtTime(45, at + 0.12)
+    kg.gain.setValueAtTime(0.0001, at)
+    kg.gain.exponentialRampToValueAtTime(accent ? 0.9 : 0.6, at + 0.004)
+    kg.gain.exponentialRampToValueAtTime(0.0001, at + 0.25)
+    kick.connect(kg).connect(ctx.destination)
+    kick.start(at)
+    kick.stop(at + 0.3)
+    const click = ctx.createOscillator(), cg = ctx.createGain()
+    click.type = 'square'
+    click.frequency.value = accent ? 2000 : 1500
+    cg.gain.setValueAtTime(accent ? 0.12 : 0.07, at)
+    cg.gain.exponentialRampToValueAtTime(0.0001, at + 0.03)
+    click.connect(cg).connect(ctx.destination)
+    click.start(at)
+    click.stop(at + 0.04)
+  }
+
+  function testTick() {
+    const { ctx, start } = test!
+    if (!claimed) claim()
+    else heartbeat()
+    if (!connecting && status.value !== 'error' && activeBulbs.value.some(b => !knownNames().includes(b.name))) connect()
+    const latency = ctx.outputLatency || ctx.baseLatency || 0
+    const ahead = SEND_LEAD + offsetMs.value / 1000 - latency - (bluetoothOutput.value ? BLUETOOTH_AUDIO_DELAY : 0)
+    const period = 60 / TEST_BPM
+    const t = ctx.currentTime - start + ahead
+    const beat = Math.floor(t / period)
+    const phase = t / period - beat
+    const lit = t >= 0 && beat < TEST_BEATS && phase < 0.2
+    const hit = lit && beat !== lastBeat
+    if (hit) lastBeat = beat
+    const c: RGB = lit ? [255, 255, 255] : [6, 6, 10]
+    for (const b of activeBulbs.value) send(b.name, c, hit)
   }
 
   // ── Connection ─────────────────────────────────────────────────────────────
@@ -245,6 +317,7 @@ export const useLightsStore = defineStore('lights', () => {
   }
 
   function tick() {
+    if (test) { testTick(); return }
     const player = usePlayerStore()
     const clock = player.lightsClock()
     const now = performance.now()
@@ -284,14 +357,6 @@ export const useLightsStore = defineStore('lights', () => {
     const t = (useNext ? clock.next!.pos : clock.pos) + ahead
     const grid = grids.get(useNext ? clock.next!.track.path : track.path) ?? null
     const names = activeBulbs.value.map(b => b.name)
-    if (now < testUntil && usableGrid(grid)) {
-      const { beat, phase } = beatPosition(grid, t)
-      const hit = beat !== lastBeat
-      lastBeat = beat
-      const c: RGB = phase < 0.2 ? [255, 255, 255] : [6, 6, 10]
-      names.forEach(n => send(n, c, hit))
-      return
-    }
     const colours = frame({
       t,
       grid,
