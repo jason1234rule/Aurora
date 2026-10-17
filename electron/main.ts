@@ -292,6 +292,8 @@ if (disabledFeatures.length > 0) {
 
 // ── Globals ────────────────────────────────────────────────────────────────
 let mainWindow: BrowserWindow | null = null
+/** Room lights: the pending Web Bluetooth device pick (see 'select-bluetooth-device') */
+let btPick: { callback: (deviceId: string) => void; timer: ReturnType<typeof setTimeout> } | null = null
 let isRelaunching = false
 let isQuitting = false // prevents before-quit re-entry after sync completes
 let tray: Tray | null = null
@@ -1282,6 +1284,17 @@ async function createWindow() {
   // Prevent Ctrl+click / middle-click on router-links from opening a blank Electron window
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
 
+  // Room lights: Web Bluetooth asks the app to pick a device. The renderer always asks for
+  // one bulb by exact name, so take the first match; give up if it isn't seen in time.
+  mainWindow.webContents.on('select-bluetooth-device', (event, devices, callback) => {
+    event.preventDefault()
+    if (btPick) clearTimeout(btPick.timer)
+    const done = (id: string) => { if (btPick?.callback === callback) { clearTimeout(btPick.timer); btPick = null } callback(id) }
+    if (devices.length) return done(devices[0].deviceId)
+    if (btPick?.callback !== callback) btPick = { callback, timer: setTimeout(() => done(''), 12000) }
+    else btPick.timer = setTimeout(() => done(''), 12000)
+  })
+
   // Forward renderer console logs to the log file
   mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
     const src = sourceId ? ` (${sourceId}:${line})` : ''
@@ -1957,6 +1970,36 @@ app.whenReady().then(async () => {
   })
 
   // ── IPC: Beat grid cache ──
+  // ── Room lights ───────────────────────────────────────────────────────
+  // Web Bluetooth only connects inside a user gesture, so each bulb is requested through
+  // executeJavaScript with userGesture set (reconnects after that don't need one)
+  ipcMain.handle('lights:connect', async (_, names: string[]) => {
+    const results: Record<string, string> = {}
+    for (const name of names) {
+      try {
+        results[name] = await mainWindow!.webContents.executeJavaScript(
+          `window.__auroraLights ? window.__auroraLights.connectOne(${JSON.stringify(name)}) : 'not ready'`, true)
+      } catch (err) {
+        results[name] = String(err)
+      }
+    }
+    return results
+  })
+  // Keystone (localhost:8777): tells it Aurora has the lights, so it pauses "Match outside"
+  // and shows who's in control. From here rather than the renderer to avoid CORS.
+  ipcMain.handle('lights:keystone', async (_, action: string, body: any) => {
+    if (!['claim', 'update', 'release'].includes(action)) return { ok: false }
+    try {
+      const r = await fetch(`http://127.0.0.1:8777/api/aurora/${action}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}),
+        signal: AbortSignal.timeout(8000),
+      })
+      return await r.json()
+    } catch (err) {
+      return { ok: false, message: String(err) }
+    }
+  })
+
   ipcMain.handle('beatgrid:get', async (_, filePath: string) => {
     try {
       const entry = (await getBeatgridCache())[filePath]

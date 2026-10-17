@@ -210,6 +210,84 @@
     </section>
 
     <!-- ── Discord Rich Presence ──────────────────────────────────── -->
+    <!-- ── Room Lights ───────────────────────────────────────────── -->
+    <section v-show="showSection('integrations', 'Room Lights')" class="mb-8">
+      <h2 class="text-lg font-semibold text-white mb-4">Room Lights</h2>
+
+      <div class="space-y-4">
+        <div class="flex items-center justify-between px-4 py-3 rounded-xl bg-white/[0.05]">
+          <div>
+            <p class="text-sm text-white/80">Sync lights to the music</p>
+            <p class="text-xs text-white/30 mt-0.5">
+              Govee bulbs pulse on the beat in the cover's colours, over Bluetooth. Keystone's "Match outside" pauses while music plays.
+            </p>
+            <p v-if="lights.enabled" class="text-xs mt-1" :class="lights.status === 'error' ? 'text-red-400/80' : 'text-white/50'">
+              {{ lightsStatusLine }}
+            </p>
+          </div>
+          <button
+            @click="lights.setEnabled(!lights.enabled)"
+            class="relative w-11 h-6 shrink-0 rounded-full transition-colors duration-200"
+            :class="lights.enabled ? 'bg-accent' : 'bg-white/15'"
+          >
+            <div
+              class="absolute top-0.5 w-5 h-5 rounded-full bg-control shadow transition-transform duration-200"
+              :class="lights.enabled ? 'translate-x-[22px]' : 'translate-x-0.5'"
+            />
+          </button>
+        </div>
+
+        <div class="px-4 py-3 rounded-xl bg-white/[0.05]">
+          <p class="text-sm text-white/80 mb-2">Lights</p>
+          <div class="flex flex-wrap gap-2">
+            <button
+              v-for="b in lights.bulbs" :key="b.name"
+              @click="lights.toggleBulb(b.name)"
+              class="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5"
+              :class="b.on ? 'bg-accent/20 text-accent' : 'bg-white/[0.06] text-white/40 hover:text-white/70'"
+              :title="b.name"
+            >
+              <span v-if="b.on && lights.enabled" class="w-1.5 h-1.5 rounded-full" :class="lights.connected.includes(b.name) ? 'bg-green-400' : 'bg-white/30'" />
+              {{ b.label }}
+            </button>
+          </div>
+          <p class="text-xs text-white/30 mt-2">The Sunset Light isn't listed: it can only show red. Lights move in this order for the chase.</p>
+        </div>
+
+        <div class="flex items-center justify-between gap-4 px-4 py-3 rounded-xl bg-white/[0.05]">
+          <div>
+            <p class="text-sm text-white/80">Style</p>
+            <p class="text-xs text-white/30 mt-0.5">{{ intensityHelp[lights.intensity] }}</p>
+          </div>
+          <div class="flex rounded-lg overflow-hidden border border-white/[0.08] shrink-0">
+            <button
+              v-for="o in (['chill', 'normal', 'party'] as const)" :key="o"
+              @click="lights.setIntensity(o)"
+              class="px-3 py-1.5 text-xs capitalize transition-colors"
+              :class="lights.intensity === o ? 'bg-white/[0.12] text-white' : 'text-white/50 hover:text-white/80'"
+            >{{ o }}</button>
+          </div>
+        </div>
+
+        <div class="px-4 py-3 rounded-xl bg-white/[0.05]">
+          <div class="flex items-center justify-between mb-2">
+            <div>
+              <p class="text-sm text-white/80">Timing</p>
+              <p class="text-xs text-white/30 mt-0.5">If the lights hit before or after the beat. Bluetooth headphones usually need the lights later.</p>
+            </div>
+            <span class="text-sm text-white/60 tabular-nums w-20 text-right">{{ lights.offsetMs > 0 ? '+' : '' }}{{ lights.offsetMs }} ms</span>
+          </div>
+          <div class="flex items-center gap-3">
+            <span class="text-xs text-white/30">later</span>
+            <input type="range" min="-500" max="500" step="10" :value="lights.offsetMs"
+              @input="lights.setOffset(+($event.target as HTMLInputElement).value)" class="flex-1 accent-accent" />
+            <span class="text-xs text-white/30">earlier</span>
+            <button @click="lights.setOffset(0)" class="text-xs text-white/30 hover:text-white/60 transition-colors">Reset</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <section v-show="showSection('integrations', 'Discord Rich Presence')" class="mb-8">
       <h2 class="text-lg font-semibold text-white mb-4">Discord Rich Presence</h2>
 
@@ -1590,6 +1668,7 @@ import { useFavoritesStore } from '@/stores/favorites'
 import { useThemeStore } from '@/stores/theme'
 import { usePluginStore } from '@/stores/plugins'
 import { useSyncStore } from '@/stores/sync'
+import { useLightsStore } from '@/stores/lights'
 import { useToast } from '@/composables/useToast'
 import { getPluginSettingsSchema, notifyPluginSettingChanged } from '@/plugins'
 import type { PluginSettingField } from '@/types/plugin'
@@ -1597,6 +1676,19 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue'
 
 const library = useLibraryStore()
 const player = usePlayerStore()
+const lights = useLightsStore()
+const intensityHelp = {
+  chill: 'Gentle pulses that never go dark',
+  normal: 'Clear pulse on every beat, bigger on the first of each bar',
+  party: 'A chase: one light per beat takes the hit',
+}
+const lightsStatusLine = computed(() => {
+  const on = lights.bulbs.filter(b => b.on).length
+  if (lights.status === 'connecting' || lights.status === 'error') return lights.statusText
+  if (lights.status === 'off') return lights.statusText || 'Connects when music plays'
+  const ks = lights.keystone === 'unreachable' ? ' · Keystone not reachable' : ''
+  return `${lights.connected.length} of ${on} lights connected${lights.statusText ? ' · ' + lights.statusText : ''}${ks}`
+})
 const playlistStore = usePlaylistStore()
 const favoritesStore = useFavoritesStore()
 const themeStore = useThemeStore()
@@ -1679,6 +1771,7 @@ const sectionKeywords: Record<string, string[]> = {
   'Library': ['songs', 'albums', 'artists', 'stats', 'count'],
   'Album Display': ['soundtrack', 'singles', 'tags', 'auto-tag', 'display', 'covers'],
   'Discord Rich Presence': ['discord', 'rpc', 'activity', 'presence', 'status'],
+  'Room Lights': ['lights', 'govee', 'bluetooth', 'keystone', 'bulbs', 'sync', 'beat'],
   'Search': ['search lyrics', 'lyrics search'],
   'Audio Output': ['audio', 'output', 'device', 'speaker', 'sound', 'sink'],
   'Playback': ['playback', 'queue', 'shuffle', 'crossfade', 'player', 'volume', 'gapless', 'transitions', 'mix', 'tempo', 'meet in the middle'],
@@ -1706,7 +1799,7 @@ function showSection(tabId: string, heading: string): boolean {
 
 const sectionTabMap: Record<string, string> = {
   'Music Folders': 'general', 'Library': 'general', 'Album Display': 'general',
-  'Discord Rich Presence': 'integrations', 'Search': 'general', 'Audio Output': 'general',
+  'Discord Rich Presence': 'integrations', 'Room Lights': 'integrations', 'Search': 'general', 'Audio Output': 'general',
   'Playback': 'general', 'Appearance': 'appearance', 'Animated Covers': 'appearance',
   'Behavior': 'general', 'Scrobbling': 'integrations', 'Navidrome / Subsonic': 'integrations',
   'Remote Control': 'integrations', 'Cache': 'system', 'Sync Folder': 'sync',

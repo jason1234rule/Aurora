@@ -11,6 +11,15 @@ import { pickNextMix, type MixCandidate } from '@/utils/transitions/mix'
 import { songKey } from '@/utils/smartPlaylistMatcher'
 import type { Transition } from '@/types/transition'
 
+export interface LightsClock {
+  playing: boolean
+  /** Seconds between the audio clock and what's heard */
+  latency: number
+  track: Track | null
+  pos: number
+  next?: { track: Track; pos: number; mix: number; sinceBassSwap: number | null }
+}
+
 // Lazy accessor for library store to avoid circular dependency
 // Must not use require() — Vite doesn't resolve @/ aliases in require() calls
 let _libStore: any = null
@@ -1492,6 +1501,27 @@ export const usePlayerStore = defineStore('player', () => {
     window.api.mergeSettings({ autoMeet: rule, autoMeetPercent: autoMeetPercent.value })
   }
 
+  /**
+   * For the room lights: what's playing and exactly where, read from the audio clock (the
+   * currentTime ref only updates a few times a second). During a hand-made transition it
+   * also gives the incoming song, how far the blend is (0–1) and time since the bass swap.
+   */
+  function lightsClock(): LightsClock {
+    const ctx = audioCtx
+    const latency = ctx ? (ctx.outputLatency || ctx.baseLatency || 0) : 0
+    const eng = txEngine, s = eng?.schedule, t = eng?.transition
+    const now = ctx?.currentTime ?? 0
+    if (eng && s && t && eng.fromTrack && eng.toTrack && (eng.phase === 'running' || eng.phase === 'handback') && now >= s.t0) {
+      const mix = Math.min(1, (now - s.t0) / Math.max(0.05, s.overlapEnd - s.t0))
+      return {
+        playing: isPlaying.value, latency,
+        track: eng.fromTrack, pos: eng.fromPosition(),
+        next: { track: eng.toTrack, pos: eng.toPosition(), mix, sinceBassSwap: t.bassSwap ? now - (s.t0 + t.bassSwap.at) : null },
+      }
+    }
+    return { playing: isPlaying.value, latency, track: currentTrack.value, pos: activeAudio().currentTime }
+  }
+
   /** Snapshot for the dev hook / debugging */
   function transitionDebug() {
     return {
@@ -2114,6 +2144,7 @@ export const usePlayerStore = defineStore('player', () => {
     setTransitionsEnabled,
     upcomingTrack,
     transitionDebug,
+    lightsClock,
     previewTransition,
     stopTransitionPreview,
     mixMode,

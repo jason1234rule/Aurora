@@ -52,15 +52,16 @@ export function rgbToLab(r: number, g: number, b: number): CoverColor {
   return { l: 116 * f(y) - 16, a: 500 * (f(x) - f(y)), b: 200 * (f(y) - f(z)) }
 }
 
-/** Main colour of RGBA pixel data */
-export function dominantColor(rgba: Uint8ClampedArray): CoverColor {
+function labPixels(rgba: Uint8ClampedArray): CoverColor[] {
   const pts: CoverColor[] = []
   for (let i = 0; i < rgba.length; i += 4) {
     if (rgba[i + 3] >= 128) pts.push(rgbToLab(rgba[i], rgba[i + 1], rgba[i + 2]))
   }
-  if (!pts.length) return { l: 0, a: 0, b: 0 }
+  return pts
+}
 
-  // k-means, seeded deterministically from evenly spaced pixels
+/** k-means, seeded deterministically from evenly spaced pixels */
+function clusters(pts: CoverColor[]): { centres: CoverColor[]; counts: number[] } {
   let centres = Array.from({ length: Math.min(CLUSTERS, pts.length) }, (_, i) => pts[Math.floor(i * pts.length / CLUSTERS)])
   let counts: number[] = []
   for (let it = 0; it < ITERATIONS; it++) {
@@ -76,6 +77,14 @@ export function dominantColor(rgba: Uint8ClampedArray): CoverColor {
     }
     centres = centres.map((c, k) => (counts[k] ? { l: sums[k].l / counts[k], a: sums[k].a / counts[k], b: sums[k].b / counts[k] } : c))
   }
+  return { centres, counts }
+}
+
+/** Main colour of RGBA pixel data */
+export function dominantColor(rgba: Uint8ClampedArray): CoverColor {
+  const pts = labPixels(rgba)
+  if (!pts.length) return { l: 0, a: 0, b: 0 }
+  const { centres, counts } = clusters(pts)
 
   let best = 0, bestScore = -1
   centres.forEach((c, k) => {
@@ -150,6 +159,46 @@ export function colorOrder<T>(items: T[], colorOf: (item: T) => CoverColor | und
   return [...path.map(x => x.item), ...grey.map(x => x.item), ...unknown]
 }
 
+export function labToRgb({ l, a, b }: CoverColor): [number, number, number] {
+  const fy = (l + 16) / 116, fx = fy + a / 500, fz = fy - b / 200
+  const inv = (t: number) => (t ** 3 > 0.008856 ? t ** 3 : (t - 16 / 116) / 7.787)
+  const X = inv(fx) * 0.95047, Y = inv(fy), Z = inv(fz) * 1.08883
+  const lin = [3.2406 * X - 1.5372 * Y - 0.4986 * Z, -0.9689 * X + 1.8758 * Y + 0.0415 * Z, 0.0557 * X - 0.204 * Y + 1.057 * Z]
+  return lin.map(c => {
+    const v = c <= 0.0031308 ? 12.92 * c : 1.055 * Math.max(0, c) ** (1 / 2.4) - 0.055
+    return Math.round(Math.max(0, Math.min(1, v)) * 255)
+  }) as [number, number, number]
+}
+
+/**
+ * Up to `max` distinct colours of a cover for the room lights, biggest and most colourful
+ * first, at full brightness (the lights set their own level). Empty for a grey cover.
+ */
+export function paletteFromPixels(rgba: Uint8ClampedArray, max = 4): [number, number, number][] {
+  const pts = labPixels(rgba)
+  if (!pts.length) return []
+  const { centres, counts } = clusters(pts)
+  const ranked = centres
+    .map((c, k) => ({ c, score: counts[k] * (COLOUR_BOOST_BASE + Math.min(chroma(c), COLOUR_BOOST_CAP) / COLOUR_BOOST_CAP) }))
+    .filter(x => chroma(x.c) >= COLOURED_CHROMA && x.score > 0)
+    .sort((x, y) => y.score - x.score)
+  const picked: CoverColor[] = []
+  for (const { c } of ranked) {
+    // Hues closer than this look the same on a bulb
+    if (picked.every(p => Math.abs(((hue(p) - hue(c) + 540) % 360) - 180) >= 25)) picked.push(c)
+    if (picked.length >= max) break
+  }
+  return picked.map(c => vivid(labToRgb(c)))
+}
+
+/** Same hue at full value and at least 70% saturation: dull cover tones look grey on a bulb */
+function vivid([r, g, b]: [number, number, number]): [number, number, number] {
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b)
+  if (mx === 0) return [255, 255, 255]
+  const s = Math.max((mx - mn) / mx, 0.7)
+  return [r, g, b].map(v => Math.round(255 * (1 - s * (1 - (v - mn) / Math.max(1, mx - mn))))) as [number, number, number]
+}
+
 // ── Cache ────────────────────────────────────────────────────────────────────
 const STORAGE_KEY = 'aurora-cover-colors-v4'
 const cache = new Map<string, CoverColor>()
@@ -178,19 +227,34 @@ export function cachedCoverColor(coverPath: string): CoverColor | undefined {
   return cache.get(coverPath)
 }
 
+async function coverPixels(coverPath: string): Promise<Uint8ClampedArray> {
+  const blob = await (await fetch(window.api.getMediaUrl(coverPath))).blob()
+  const bitmap = await createImageBitmap(blob, { resizeWidth: SIZE, resizeHeight: SIZE, resizeQuality: 'medium' })
+  const canvas = new OffscreenCanvas(SIZE, SIZE)
+  const ctx = canvas.getContext('2d')!
+  ctx.drawImage(bitmap, 0, 0)
+  bitmap.close()
+  return ctx.getImageData(0, 0, SIZE, SIZE).data
+}
+
+const palettes = new Map<string, [number, number, number][]>()
+/** Colours for the room lights (cached in memory by path); empty for grey or unreadable covers */
+export async function coverPalette(coverPath: string): Promise<[number, number, number][]> {
+  const hit = palettes.get(coverPath)
+  if (hit) return hit
+  let p: [number, number, number][] = []
+  try { p = paletteFromPixels(await coverPixels(coverPath)) } catch { /* unreadable */ }
+  palettes.set(coverPath, p)
+  return p
+}
+
 /** Analyse a cover file (cached by path). Returns null if it can't be read. */
 export async function coverColor(coverPath: string): Promise<CoverColor | null> {
   loadCache()
   const hit = cache.get(coverPath)
   if (hit) return hit
   try {
-    const blob = await (await fetch(window.api.getMediaUrl(coverPath))).blob()
-    const bitmap = await createImageBitmap(blob, { resizeWidth: SIZE, resizeHeight: SIZE, resizeQuality: 'medium' })
-    const canvas = new OffscreenCanvas(SIZE, SIZE)
-    const ctx = canvas.getContext('2d')!
-    ctx.drawImage(bitmap, 0, 0)
-    bitmap.close()
-    const color = dominantColor(ctx.getImageData(0, 0, SIZE, SIZE).data)
+    const color = dominantColor(await coverPixels(coverPath))
     cache.set(coverPath, color)
     saveCache()
     return color

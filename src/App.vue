@@ -62,6 +62,7 @@ import { usePluginStore } from '@/stores/plugins'
 import { useStatsStore } from '@/stores/stats'
 import { useSyncStore } from '@/stores/sync'
 import { useTransitionsStore } from '@/stores/transitions'
+import { useLightsStore } from '@/stores/lights'
 import { installTransitionDevHook } from '@/utils/transitions/devHook'
 import Titlebar from '@/components/Titlebar.vue'
 import Sidebar from '@/components/Sidebar.vue'
@@ -128,6 +129,8 @@ onMounted(async () => {
 
   // Load stats (non-blocking)
   statsStore.loadStats()
+  // Room lights (only does anything once turned on in Settings)
+  useLightsStore().init()
 
   // Load saved settings
   const settings = await window.api.getSettings()

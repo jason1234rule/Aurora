@@ -298,6 +298,7 @@ export class TransitionEngine {
   get transition(): Transition | null { return this.plan?.transition ?? null }
   get schedule(): TransitionSchedule | null { return this.plan?.schedule ?? null }
   get toTrack(): Track | null { return this.plan?.toTrack ?? null }
+  get fromTrack(): Track | null { return this.plan?.fromTrack ?? null }
 
   /** File position of TO right now (only meaningful once running) */
   toPosition(): number {

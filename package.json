@@ -25,6 +25,11 @@
   "build": {
     "appId": "com.wilk087.aurora-player",
     "productName": "Aurora Player",
+    "mac": {
+      "extendInfo": {
+        "NSBluetoothAlwaysUsageDescription": "Aurora syncs your room lights to the music over Bluetooth."
+      }
+    },
     "artifactName": "aurora-player-${version}-${os}-${arch}.${ext}",
     "directories": {
       "output": "release"

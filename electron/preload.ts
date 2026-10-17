@@ -70,6 +70,8 @@ contextBridge.exposeInMainWorld('api', {
   saveTransition: (transition: any) => ipcRenderer.invoke('transitions:save', transition),
   deleteTransition: (id: string) => ipcRenderer.invoke('transitions:delete', id),
   getBeatGrid: (filePath: string) => ipcRenderer.invoke('beatgrid:get', filePath),
+  lightsConnect: (names: string[]) => ipcRenderer.invoke('lights:connect', names),
+  lightsKeystone: (action: 'claim' | 'update' | 'release', body?: any) => ipcRenderer.invoke('lights:keystone', action, body),
   saveBeatGrid: (filePath: string, grid: any) => ipcRenderer.invoke('beatgrid:set', filePath, grid),
 
   // Discord RPC
