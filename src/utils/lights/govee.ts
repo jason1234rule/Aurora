@@ -32,8 +32,12 @@ export function colourPackets([r, g, b]: RGB, name = ''): Uint8Array<ArrayBuffer
   return [packet(0x33, 0x05, 0x02, r, g, b), packet(0x33, 0x05, 0x0d, r, g, b)]
 }
 export const powerPacket = (on: boolean) => packet(0x33, 0x01, on ? 1 : 0)
-/** Brightness 0–255 */
-export const brightnessPacket = (level: number) => packet(0x33, 0x04, Math.max(1, Math.min(255, Math.round(level))))
+/**
+ * Brightness as a fraction (0–1), sent as 0–100 (0x64 is full) like the Govee app does for
+ * these bulbs. A 255 most likely isn't understood, which would leave them at whatever brightness the
+ * Govee app or Keystone had last set.
+ */
+export const brightnessPacket = (level: number) => packet(0x33, 0x04, Math.max(1, Math.min(100, Math.round(level * 100))))
 /** Govee drops idle connections; this keeps them open */
 export const keepAlivePacket = () => packet(0xaa, 0x01)
 
@@ -73,7 +77,7 @@ async function attach(b: Bulb) {
   const service = await server.getPrimaryService(GOVEE_SERVICE)
   b.char = await service.getCharacteristic(GOVEE_WRITE)
   await write(b, powerPacket(true))
-  await write(b, brightnessPacket(255))
+  await write(b, brightnessPacket(1))
 }
 
 /**
