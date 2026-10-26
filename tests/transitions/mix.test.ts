@@ -47,4 +47,13 @@ describe('pickNextMix', () => {
     expect(counts.out1).toBe(100)
     expect(counts.out2).toBe(100)
   })
+
+  it('leans toward the target heard longest ago', () => {
+    // 'old' was 12 plays ago, 'new' 9 plays ago: weights 144 : 81
+    const recent = ['old', ...Array.from({ length: 2 }, (_, i) => `x${i}`), 'new', ...Array.from({ length: 8 }, (_, i) => `y${i}`)]
+    const counts: Record<string, number> = { old: 0, new: 0 }
+    const random = sweep(225)
+    for (let i = 0; i < 225; i++) counts[pickNextMix({ candidates: [cand('old'), cand('new')], recentKeys: recent, contextKeys: new Set(), random })!.key]++
+    expect(counts).toEqual({ old: 144, new: 81 })
+  })
 })
