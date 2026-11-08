@@ -43,18 +43,19 @@
         </p>
       </div>
 
-      <!-- Flag as the clean version, for the re-download list in Settings → Library -->
+      <!-- Flag to re-download (clean version, wrong mix, wrong credits...), listed in Settings → Library -->
       <button
         v-if="player.currentTrack"
-        @click="toggleCleanFlag"
+        @click="showFlagDialog = true"
         class="w-7 h-7 shrink-0 rounded-full flex items-center justify-center transition-colors"
         :class="cleanFlags.isFlagged(player.currentTrack) ? 'text-amber-400' : 'text-white/25 hover:text-white/70'"
-        :title="cleanFlags.isFlagged(player.currentTrack) ? 'Flagged as the clean version (click to unflag)' : 'Flag as the clean version'"
+        :title="cleanFlags.isFlagged(player.currentTrack) ? 'Flagged: ' + cleanFlags.noteOf(cleanFlags.flagOf(player.currentTrack)!) : 'Flag to re-download'"
       >
         <svg class="w-4 h-4" :fill="cleanFlags.isFlagged(player.currentTrack) ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" d="M3 3v18M3 4.5h11.25l-1.5 3.75 1.5 3.75H3" />
         </svg>
       </button>
+      <FlagDialog :show="showFlagDialog" :track="player.currentTrack" @close="showFlagDialog = false" />
     </div>
 
     <!-- ── Plugin slot (left of transport) ─────────────────────────── -->
@@ -298,7 +299,7 @@ import { useRouter } from 'vue-router'
 import { usePlayerStore } from '@/stores/player'
 import { useLibraryStore } from '@/stores/library'
 import { useCleanFlagsStore } from '@/stores/cleanFlags'
-import { useToast } from '@/composables/useToast'
+import FlagDialog from '@/components/FlagDialog.vue'
 import { formatTime } from '@/utils/formatTime'
 import QueuePanel from '@/components/QueuePanel.vue'
 import IOSSlider from '@/components/IOSSlider.vue'
@@ -308,14 +309,7 @@ import SleepTimerMenu from '@/components/SleepTimerMenu.vue'
 const router = useRouter()
 const player = usePlayerStore()
 const cleanFlags = useCleanFlagsStore()
-const toast = useToast()
-
-async function toggleCleanFlag() {
-  const t = player.currentTrack
-  if (!t) return
-  const flagged = await cleanFlags.toggle(t)
-  toast.success(flagged ? `Flagged "${t.title}" as the clean version` : `Unflagged "${t.title}"`)
-}
+const showFlagDialog = ref(false)
 const library = useLibraryStore()
 const showQueue = ref(false)
 

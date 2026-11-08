@@ -135,9 +135,9 @@
     </section>
 
     <!-- ── Clean versions flagged for re-download ─────────────────── -->
-    <section v-show="showSection('general', 'Clean Versions to Replace')" class="mb-8">
+    <section v-show="showSection('general', 'Songs to Re-download')" class="mb-8">
       <div class="flex items-center justify-between mb-4">
-        <h2 class="text-lg font-semibold text-white">Clean Versions to Replace</h2>
+        <h2 class="text-lg font-semibold text-white">Songs to Re-download</h2>
         <button
           v-if="cleanFlags.flags.length"
           @click="copyCleanList"
@@ -147,14 +147,22 @@
         </button>
       </div>
       <p v-if="!cleanFlags.flags.length" class="px-4 py-3 rounded-xl bg-white/[0.05] text-sm text-white/40">
-        Nothing flagged. Use the flag next to the song in the player bar, or right-click a song → Flag as Clean Version.
+        Nothing flagged. Use the flag next to the song in the player bar, or right-click a song → Flag to Re-download.
       </p>
       <div v-else class="rounded-xl bg-white/[0.05] divide-y divide-white/[0.05]">
         <div v-for="f in cleanFlags.flags" :key="f.key" class="flex items-center gap-3 px-4 py-2.5">
-          <div class="min-w-0 flex-1">
+          <div class="min-w-0 w-2/5 shrink-0">
             <p class="text-sm text-white truncate">{{ f.title }}</p>
             <p class="text-xs text-white/40 truncate">{{ f.artist }}<template v-if="f.album"> · {{ f.album }}</template></p>
           </div>
+          <input
+            :value="cleanFlags.noteOf(f)"
+            @change="cleanFlags.setNote(f.key, ($event.target as HTMLInputElement).value.trim())"
+            @keydown.enter="($event.target as HTMLInputElement).blur()"
+            placeholder="What's wrong with it?"
+            class="ctx-input flex-1 min-w-0 rounded-lg px-2.5 py-1.5 text-xs"
+            title="Edit the note"
+          />
           <button
             @click="cleanFlags.remove(f.key)"
             class="text-xs text-white/40 hover:text-white/80 transition-colors shrink-0"
@@ -1821,7 +1829,7 @@ const isSearching = computed(() => settingsSearch.value.trim().length > 0)
 const sectionKeywords: Record<string, string[]> = {
   'Music Folders': ['folder', 'scan', 'rescan', 'add folder', 'music library'],
   'Library': ['songs', 'albums', 'artists', 'stats', 'count'],
-  'Clean Versions to Replace': ['clean', 'explicit', 'censored', 'flag', 'flagged', 're-download', 'redownload'],
+  'Songs to Re-download': ['clean', 'explicit', 'censored', 'flag', 'flagged', 're-download', 'redownload', 'remix', 'wrong version', 'note'],
   'Album Display': ['soundtrack', 'singles', 'tags', 'auto-tag', 'display', 'covers'],
   'Discord Rich Presence': ['discord', 'rpc', 'activity', 'presence', 'status'],
   'Room Lights': ['lights', 'govee', 'bluetooth', 'keystone', 'bulbs', 'sync', 'beat'],
@@ -1851,7 +1859,7 @@ function showSection(tabId: string, heading: string): boolean {
 }
 
 const sectionTabMap: Record<string, string> = {
-  'Music Folders': 'general', 'Library': 'general', 'Clean Versions to Replace': 'general', 'Album Display': 'general',
+  'Music Folders': 'general', 'Library': 'general', 'Songs to Re-download': 'general', 'Album Display': 'general',
   'Discord Rich Presence': 'integrations', 'Room Lights': 'integrations', 'Search': 'general', 'Audio Output': 'general',
   'Playback': 'general', 'Appearance': 'appearance', 'Animated Covers': 'appearance',
   'Behavior': 'general', 'Scrobbling': 'integrations', 'Navidrome / Subsonic': 'integrations',

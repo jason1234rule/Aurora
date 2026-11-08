@@ -174,13 +174,13 @@
           {{ favoritesStore.isFavorite(track.id) ? 'Remove from Favorites' : 'Add to Favorites' }}
         </button>
         <button
-          @click.stop="toggleCleanFlag"
+          @click.stop="openFlagDialog"
           class="ctx-item w-full px-3.5 py-2 text-left text-sm transition-colors flex items-center gap-2.5"
         >
           <svg class="w-4 h-4 shrink-0" :class="cleanFlags.isFlagged(track) ? 'text-amber-400' : 'opacity-50'" :fill="cleanFlags.isFlagged(track) ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" d="M3 3v18M3 4.5h11.25l-1.5 3.75 1.5 3.75H3" />
           </svg>
-          {{ cleanFlags.isFlagged(track) ? 'Unflag Clean Version' : 'Flag as Clean Version' }}
+          {{ cleanFlags.isFlagged(track) ? 'Edit Flag…' : 'Flag to Re-download…' }}
         </button>
         <div class="border-t border-[var(--border)] my-1" />
         <button
@@ -313,6 +313,7 @@
     />
 
     <!-- Tag Dialog -->
+    <FlagDialog :show="showFlagDialog" :track="track" @close="showFlagDialog = false" />
     <TagDialog
       :show="showTagDialog"
       type="track"
@@ -461,6 +462,7 @@ import PlaylistSubmenu from '@/components/PlaylistSubmenu.vue'
 import { pluginContextMenuItems } from '@/plugins/api'
 import type { PluginContextMenuItem } from '@/types/plugin'
 import TagDialog from '@/components/TagDialog.vue'
+import FlagDialog from '@/components/FlagDialog.vue'
 import TrackPickerDialog from '@/components/transitions/TrackPickerDialog.vue'
 
 const props = defineProps<{
@@ -545,10 +547,11 @@ async function toggleFavorite() {
   showCtx.value = false
 }
 
-async function toggleCleanFlag() {
-  const flagged = await cleanFlags.toggle(props.track)
-  toast.success(flagged ? 'Flagged as the clean version' : 'Unflagged')
+const showFlagDialog = ref(false)
+function openFlagDialog() {
   showCtx.value = false
+  // Same click-through guard as the tag dialog
+  setTimeout(() => { showFlagDialog.value = true }, 80)
 }
 
 async function toggleFavoriteInline() {
