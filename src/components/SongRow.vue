@@ -173,6 +173,15 @@
           </svg>
           {{ favoritesStore.isFavorite(track.id) ? 'Remove from Favorites' : 'Add to Favorites' }}
         </button>
+        <button
+          @click.stop="toggleCleanFlag"
+          class="ctx-item w-full px-3.5 py-2 text-left text-sm transition-colors flex items-center gap-2.5"
+        >
+          <svg class="w-4 h-4 shrink-0" :class="cleanFlags.isFlagged(track) ? 'text-amber-400' : 'opacity-50'" :fill="cleanFlags.isFlagged(track) ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M3 3v18M3 4.5h11.25l-1.5 3.75 1.5 3.75H3" />
+          </svg>
+          {{ cleanFlags.isFlagged(track) ? 'Unflag Clean Version' : 'Flag as Clean Version' }}
+        </button>
         <div class="border-t border-[var(--border)] my-1" />
         <button
           @click.stop="goToArtist"
@@ -444,6 +453,7 @@ import { usePlayerStore } from '@/stores/player'
 import { useLibraryStore } from '@/stores/library'
 import { useToast } from '@/composables/useToast'
 import { useFavoritesStore } from '@/stores/favorites'
+import { useCleanFlagsStore } from '@/stores/cleanFlags'
 import { menuPosition, subMenuPosition } from '@/utils/menuPosition'
 import { formatTime } from '@/utils/formatTime'
 import ArtistLinks from '@/components/ArtistLinks.vue'
@@ -469,6 +479,7 @@ const player = usePlayerStore()
 const library = useLibraryStore()
 const toast = useToast()
 const favoritesStore = useFavoritesStore()
+const cleanFlags = useCleanFlagsStore()
 
 const isActive = computed(() => player.currentTrack?.id === props.track.id)
 const isPlaying = computed(() => isActive.value && player.isPlaying)
@@ -531,6 +542,12 @@ async function toggleFavorite() {
   await favoritesStore.toggle(props.track.id)
   const isFav = favoritesStore.isFavorite(props.track.id)
   toast.success(isFav ? 'Added to Favorites' : 'Removed from Favorites')
+  showCtx.value = false
+}
+
+async function toggleCleanFlag() {
+  const flagged = await cleanFlags.toggle(props.track)
+  toast.success(flagged ? 'Flagged as the clean version' : 'Unflagged')
   showCtx.value = false
 }
 

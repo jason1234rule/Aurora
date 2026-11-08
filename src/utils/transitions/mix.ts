@@ -22,6 +22,8 @@ export interface MixPickInput {
   avoidLast?: number
   /** How much more likely a target in the current context is */
   contextWeight?: number
+  /** Only pick targets in the context (playing a playlist or album shouldn't wander off it) */
+  stayInContext?: boolean
   random?: () => number
 }
 
@@ -43,7 +45,7 @@ export function pickNextMix(input: MixPickInput): MixCandidate | null {
   const avoid = new Set(input.recentKeys.slice(-(input.avoidLast ?? MIX_AVOID_LAST)))
   const weight = input.contextWeight ?? MIX_CONTEXT_WEIGHT
   const pool = input.candidates
-    .filter(c => !c.transition.needsReview && !avoid.has(c.key))
+    .filter(c => !c.transition.needsReview && !avoid.has(c.key) && (!input.stayInContext || input.contextKeys.has(c.key)))
     .map(c => ({ c, w: (input.contextKeys.has(c.key) ? weight : 1) * playsSince(c.key, input.recentKeys) ** 2 }))
   if (!pool.length) return null
   const total = pool.reduce((s, p) => s + p.w, 0)

@@ -1473,10 +1473,14 @@ export const usePlayerStore = defineStore('player', () => {
       const track = resolveEndpointTrack(t.to)
       if (track && isLocalTrack(track) && track.id !== cur.id) candidates.push({ transition: t, track, key: t.to.key })
     }
+    // Started from a playlist, album or queue: only follow transitions inside it. When none
+    // fits, Mix doesn't pick and the queue carries on in its own order
+    const context = new Set(originalQueue.value.map(songKey))
     const pick = pickNextMix({
       candidates,
       recentKeys: mixHistory,
-      contextKeys: new Set(originalQueue.value.map(songKey)),
+      contextKeys: context,
+      stayInContext: context.size > 1,
     })
     if (!pick) return
 

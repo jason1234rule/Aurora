@@ -56,4 +56,13 @@ describe('pickNextMix', () => {
     for (let i = 0; i < 225; i++) counts[pickNextMix({ candidates: [cand('old'), cand('new')], recentKeys: recent, contextKeys: new Set(), random })!.key]++
     expect(counts).toEqual({ old: 144, new: 81 })
   })
+
+  it('stays inside the context when asked', () => {
+    const candidates = [cand('in'), cand('out')]
+    for (const r of [0, 0.5, 0.99]) {
+      expect(pickNextMix({ candidates, recentKeys: [], contextKeys: new Set(['in']), stayInContext: true, random: () => r })?.key).toBe('in')
+    }
+    // Nothing in the context to go to: no pick, so the queue carries on
+    expect(pickNextMix({ candidates: [cand('out')], recentKeys: [], contextKeys: new Set(['in']), stayInContext: true })).toBeNull()
+  })
 })
